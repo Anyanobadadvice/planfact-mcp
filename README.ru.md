@@ -41,7 +41,7 @@ PlanFact это система учёта для малого бизнеса. AP
 ## Установка
 
 ```bash
-git clone https://github.com/<your-username>/planfact-mcp.git
+git clone https://github.com/Anyanobadadvice/planfact-mcp.git
 cd planfact-mcp
 npm install
 cp .env.example .env
@@ -119,6 +119,10 @@ claude mcp add planfact -- node /path/to/planfact-mcp/dist/index.js
 ```
 
 Инструменты записи останавливаются и ждут. Вы читаете сводку, потом подтверждаете.
+
+## Лицензия
+
+MIT — см. [LICENSE](LICENSE).
 
 ## Об авторе
 

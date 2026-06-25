@@ -3,9 +3,35 @@
   "version": "0.1.0",
   "description": "Local MCP server for PlanFact financial assistant workflows",
   "type": "module",
+  "license": "MIT",
+  "author": "Anna Sideleva (No Bad Advice)",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "planfact",
+    "finance",
+    "accounting",
+    "claude",
+    "ai-agent"
+  ],
   "bin": {
     "planfact-mcp-server": "dist/index.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Anyanobadadvice/planfact-mcp.git"
+  },
+  "homepage": "https://github.com/Anyanobadadvice/planfact-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/Anyanobadadvice/planfact-mcp/issues"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.ru.md",
+    "LICENSE",
+    ".env.example"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",

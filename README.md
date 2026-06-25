@@ -41,7 +41,7 @@ A detailed write-up of how this MCP works is on my site: [nobadadvice.com](https
 ## Setup
 
 ```bash
-git clone https://github.com/<your-username>/planfact-mcp.git
+git clone https://github.com/Anyanobadadvice/planfact-mcp.git
 cd planfact-mcp
 npm install
 cp .env.example .env
@@ -119,6 +119,10 @@ Prepare a next-month plan based on this month: what to control, what to collect,
 ```
 
 Write tools stop and wait. You read the summary, then you confirm.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ## About
 
