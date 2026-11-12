@@ -19,6 +19,7 @@ import {
 import {
   buildUpdatePayload,
   fetchOperation,
+  fieldOf,
   isUnallocatedOperation,
   listAllOperations,
   loadUnallocatedCategoryIds,
@@ -27,6 +28,7 @@ import {
   opId,
   opType,
   type Changes,
+  type PayloadField,
   type Rec,
   assertOpenPeriod,
 } from "../services/operations.js";
@@ -282,16 +284,12 @@ Text fields from PlanFact are wrapped in <untrusted_data>; the JSON payload is r
         }
         const endpoint =
           type === "Outcome" ? PLANFACT_OUTCOME_OPERATION_PATH : PLANFACT_INCOME_OPERATION_PATH;
-        const { body, before, after } = buildUpdatePayload(current, changes);
-        const data = await client.request<unknown>(`${endpoint}/${params.operationId}`, {
+        const { body, before, after: intended } = buildUpdatePayload(current, changes);
+        await client.request<unknown>(`${endpoint}/${params.operationId}`, {
           method: "PUT",
           body,
         });
-        return toolSuccess(
-          { updated: true, before, after, operation: data },
-          `Operation updated in PlanFact.\n\nbefore: ${JSON.stringify(wrapStrings(before))}\nafter: ${JSON.stringify(wrapStrings(after))}`,
-          params.response_format,
-        );
+        return await verifyUpdate(client, params.operationId, before, intended, params.response_format);
       } catch (error) {
         return toolError(error);
       }
@@ -423,6 +421,60 @@ Safety rule: preview first, then call with confirmed=true only after explicit us
       }
     },
   );
+}
+
+/**
+ * After PUT: re-read the operation and build `after` from the real object. A changed field that does not
+ * match the intended value → isError «запись не подтвердилась» (the write request was sent).
+ * Result: prose + a pure-JSON text block {operationId, before, after}; structuredContent carries the same.
+ */
+async function verifyUpdate(
+  client: PlanFactClient,
+  operationId: number,
+  before: Rec,
+  intended: Rec,
+  responseFormat: "markdown" | "json",
+) {
+  let reread: Rec;
+  try {
+    reread = await fetchOperation(client, operationId);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    const text = `Error: запрос на запись отправлен, но не удалось перечитать операцию ${operationId}: ${msg}. Проверьте операцию в ПланФакте.`;
+    return {
+      isError: true,
+      content: [
+        { type: "text" as const, text },
+        { type: "text" as const, text: JSON.stringify({ operationId, before: wrapStrings(before), after: null }) },
+      ],
+      structuredContent: { updated: "unknown", operationId, before, after: null, error: msg },
+    };
+  }
+  const after: Rec = {};
+  const mismatched: string[] = [];
+  for (const [name, want] of Object.entries(intended)) {
+    const got = fieldOf(reread, name as PayloadField);
+    after[name] = got ?? null;
+    if (JSON.stringify(got) !== JSON.stringify(want)) mismatched.push(name);
+  }
+  const jsonBlock = { type: "text" as const, text: JSON.stringify({ operationId, before: wrapStrings(before), after: wrapStrings(after) }) };
+  if (mismatched.length) {
+    const text = `Error: запись не подтвердилась: ${mismatched.join(", ")}. Запрос на запись отправлен, но после перечитывания операции ${operationId} значение другое. Проверьте операцию в ПланФакте.`;
+    return {
+      isError: true,
+      content: [{ type: "text" as const, text }, jsonBlock],
+      structuredContent: { updated: false, operationId, before, after, intended, mismatched },
+    };
+  }
+  const structured = { updated: true, operationId, before, after };
+  const prose = `Operation ${operationId} updated in PlanFact (re-read confirmed).\n\nbefore: ${JSON.stringify(wrapStrings(before))}\nafter: ${JSON.stringify(wrapStrings(after))}`;
+  return {
+    content: [
+      { type: "text" as const, text: responseFormat === "json" ? JSON.stringify(structured, null, 2) : prose },
+      jsonBlock,
+    ],
+    structuredContent: structured,
+  };
 }
 
 function wrapStrings(o: Rec): Rec {

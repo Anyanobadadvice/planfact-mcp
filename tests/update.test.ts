@@ -191,3 +191,48 @@ describe("planfact_update_operation: closed months on split operations", () => {
     expect(puts(calls)).toHaveLength(0);
   });
 });
+
+describe("planfact_update_operation: re-read after write and machine-readable result", () => {
+  it("re-reads the operation after PUT and builds `after` from the real object", async () => {
+    const { handlers, calls } = setup({ single: realOp(5, "2026-11-01", UNALLOC, "x") });
+    const res = await run(handlers, { operationId: 5, operationCategoryId: 11, comment: "новый", confirmed: true });
+    expect(res.isError).toBeUndefined();
+    const gets = calls.filter((c) => c.method === "GET" && c.path === "/operations/5");
+    expect(gets).toHaveLength(2);
+    expect(calls.indexOf(gets[1])).toBeGreaterThan(calls.indexOf(puts(calls)[0]));
+    expect(res.structuredContent).toMatchObject({
+      operationId: 5,
+      before: { operationCategoryId: 99, comment: "x" },
+      after: { operationCategoryId: 11, comment: "новый" },
+    });
+  });
+
+  it("returns a pure-JSON text block {before, after, operationId} next to the prose", async () => {
+    const { handlers } = setup({ single: realOp(5, "2026-11-01", UNALLOC, "x") });
+    const res = await handlers.planfact_update_operation(
+      updateOperationSchema.parse({ operationId: 5, operationCategoryId: 11, confirmed: true }),
+    );
+    expect(res.content).toHaveLength(2);
+    expect(res.content[0].text).toMatch(/updated/i);
+    const json = JSON.parse(res.content[1].text);
+    expect(json).toEqual({ operationId: 5, before: { operationCategoryId: 99 }, after: { operationCategoryId: 11 } });
+  });
+
+  it("write not reflected on re-read → isError «запись не подтвердилась: <field>», says the write happened", async () => {
+    const { handlers, calls } = setup({ single: realOp(5, "2026-11-01", UNALLOC, "x"), dropWrites: true });
+    const res = await run(handlers, { operationId: 5, operationCategoryId: 11, confirmed: true });
+    expect(puts(calls)).toHaveLength(1);
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain("запись не подтвердилась: operationCategoryId");
+    expect(res.content[0].text).toMatch(/запрос на запись отправлен/i);
+    expect(res.structuredContent.after).toEqual({ operationCategoryId: 99 });
+  });
+
+  it("re-read failed → isError, says the write was sent", async () => {
+    const { handlers, calls } = setup({ single: realOp(5, "2026-11-01", UNALLOC, "x"), failReread: true });
+    const res = await run(handlers, { operationId: 5, operationCategoryId: 11, confirmed: true });
+    expect(puts(calls)).toHaveLength(1);
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/не удалось перечитать/);
+  });
+});

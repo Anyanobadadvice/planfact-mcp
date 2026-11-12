@@ -59,9 +59,28 @@ export const noCategoryOp = realOp(6, "2026-11-02", null, "Курьерская 
 export const categories = [TRANSPORT, PACKING, UNALLOC].map((c) => ({ ...c, activityType: "Operating" }));
 export const allOps: Op[] = [...sdekOps, noCategoryOp];
 
-export function setup(opts: { ops?: Op[]; single?: Op } = {}) {
+/** Applies a PUT body to the stored operation the way PlanFact would (single-part ops). */
+export function applyPut(op: Op, body: any): void {
+  for (const k of ["operationDate", "comment", "value", "isCommitted", "externalId"]) {
+    if (body[k] !== undefined) op[k] = body[k];
+  }
+  const part = op.operationParts?.[0];
+  const item = body.items?.[0];
+  if (!part || !item) return;
+  if (item.operationCategoryId !== undefined) {
+    part.operationCategory = { operationCategoryId: item.operationCategoryId, title: null };
+    if (op.operationCategory?.operationCategoryId > 0) op.operationCategory = { ...part.operationCategory };
+  }
+  if (item.contrAgentId !== undefined) part.contrAgent = { contrAgentId: item.contrAgentId, title: null, isUndistributed: false };
+  if (item.projectId !== undefined) part.project = { projectId: item.projectId, title: null, isUndistributed: false };
+  for (const k of ["calculationDate", "isCalculationCommitted", "value"]) if (item[k] !== undefined) part[k] = item[k];
+}
+
+export function setup(opts: { ops?: Op[]; single?: Op; dropWrites?: boolean; failReread?: boolean } = {}) {
   const calls: Call[] = [];
-  const ops = opts.ops ?? allOps;
+  const ops: Op[] = structuredClone(opts.ops ?? allOps);
+  const single: Op | undefined = opts.single ? structuredClone(opts.single) : undefined;
+  let wrote = false;
   const fetchMock = vi.fn(async (input: any, init: any = {}) => {
     const url = new URL(String(input));
     const path = url.pathname.replace("/api/v1", "");
@@ -79,11 +98,17 @@ export function setup(opts: { ops?: Op[]; single?: Op } = {}) {
     }
     const g = path.match(/^\/operations\/(\d+)$/);
     if (g && method === "GET") {
-      const single = opts.single ?? ops.find((o) => o.operationId === Number(g[1]));
-      return single ? json(single) : new Response(JSON.stringify({ isSuccess: true, data: {} }), { status: 200 });
+      if (wrote && opts.failReread) return new Response("{}", { status: 500 });
+      const op = single ?? ops.find((o) => o.operationId === Number(g[1]));
+      return op ? json(op) : new Response(JSON.stringify({ isSuccess: true, data: {} }), { status: 200 });
     }
     const m = path.match(/^\/operations\/(income|outcome)\/(\d+)$/);
-    if (m && method === "PUT") return json({ operationId: Number(m[2]), ...body });
+    if (m && method === "PUT") {
+      wrote = true;
+      const op = single ?? ops.find((o) => o.operationId === Number(m[2]));
+      if (op && !opts.dropWrites) applyPut(op, body);
+      return json({ operationId: Number(m[2]) });
+    }
     return new Response("{}", { status: 404 });
   });
   vi.stubGlobal("fetch", fetchMock);
