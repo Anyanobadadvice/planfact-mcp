@@ -134,3 +134,20 @@ export const createOpuAccrualSchema = z
     response_format: responseFormatSchema,
   })
   .strict();
+
+export const listUnallocatedSchema = z
+  .object({
+    dateStart: dateStringSchema.describe("Period start (operation date)."),
+    dateEnd: dateStringSchema.describe("Period end (operation date)."),
+    page: z.number().int().min(1).default(1),
+    pageSize: z.number().int().min(1).max(100).default(10),
+    response_format: responseFormatSchema,
+  })
+  .strict();
+
+export const suggestCategorySchema = z
+  .object({
+    operationId: z.number().int().positive().describe("PlanFact operation ID to suggest a category for."),
+    response_format: responseFormatSchema,
+  })
+  .strict();

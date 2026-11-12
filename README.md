@@ -32,7 +32,7 @@ A detailed write-up of how this MCP works is on my site: [nobadadvice.com](https
 
 **Read**
 
-`planfact_list_accounts` · `planfact_list_account_groups` · `planfact_list_projects` · `planfact_list_project_groups` · `planfact_list_counterparties` · `planfact_list_companies` · `planfact_list_operation_categories` · `planfact_list_operations` · `planfact_get_account_history` · `planfact_get_income_outcome_by_categories` · `planfact_get_income_outcome_by_projects` · `planfact_get_current_balances` · `planfact_find_data_gaps` · `planfact_prepare_monthly_review` · `planfact_prepare_next_month_plan`
+`planfact_list_accounts` · `planfact_list_account_groups` · `planfact_list_projects` · `planfact_list_project_groups` · `planfact_list_counterparties` · `planfact_list_companies` · `planfact_list_operation_categories` · `planfact_list_operations` · `planfact_list_unallocated` · `planfact_suggest_category` · `planfact_get_account_history` · `planfact_get_income_outcome_by_categories` · `planfact_get_income_outcome_by_projects` · `planfact_get_current_balances` · `planfact_find_data_gaps` · `planfact_prepare_monthly_review` · `planfact_prepare_next_month_plan`
 
 **Write** (require `confirmed=true`)
 
@@ -129,3 +129,7 @@ MIT — see [LICENSE](LICENSE).
 Built by Anna Sideleva, **No Bad Advice**. I do AI automation and integrations: n8n workflows, bots, CRM and payment plumbing, custom MCP servers like this one.
 
 [nobadadvice.com](https://nobadadvice.com)
+
+## Safe update and category suggestions
+
+`planfact_update_operation` with `confirmed=true` first reads the current operation with `GET {PLANFACT_INCOME_OPERATION_PATH|PLANFACT_OUTCOME_OPERATION_PATH}/{operationId}` (income is tried first, outcome second, unless `operationType` is passed), merges only the fields you passed into that object and sends the whole object with `PUT` to the same path, so fields you did not touch (for example `comment`) are never wiped. The response carries `before`/`after` for the fields that actually changed. This single-operation GET path is the assumed PlanFact route and is verified only against mocks, not the live API; if PlanFact rejects it, the tool returns an error instead of writing. `planfact_list_unallocated` and `planfact_suggest_category` are read-only; in their text output comments and counterparty names are wrapped in `<untrusted_data>...</untrusted_data>` (structured JSON stays raw), so downstream agents treat them as data, not instructions. Run tests with `npm test`.

@@ -52,3 +52,8 @@ function stringifyCell(value: unknown): string {
   if (typeof value === "object") return JSON.stringify(value);
   return String(value).replace(/\|/g, "\\|");
 }
+
+/** Marks externally-sourced text (comments, counterparty names) as data, not instructions. */
+export function untrusted(s: string): string {
+  return `<untrusted_data>${s}</untrusted_data>`;
+}
