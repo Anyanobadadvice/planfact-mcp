@@ -28,6 +28,7 @@ import {
   opType,
   type Changes,
   type Rec,
+  assertOpenPeriod,
 } from "../services/operations.js";
 import type { PlanFactClient } from "../services/planfactClient.js";
 import { suggest } from "../services/suggest.js";
@@ -269,6 +270,7 @@ Text fields from PlanFact are wrapped in <untrusted_data>; the JSON payload is r
 
         // Safe update: GET the current operation, build the canonical PUT body from a fixed field list.
         const current = await fetchOperation(client, params.operationId);
+        assertOpenPeriod(current, changes);
         const type = opType(current);
         if (type !== "Income" && type !== "Outcome") {
           throw new Error(`Cannot update operation ${params.operationId}: unsupported operationType "${type ?? "unknown"}".`);

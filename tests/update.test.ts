@@ -141,3 +141,35 @@ describe("planfact_update_operation (GET + canonical PUT)", () => {
   });
 });
 void sdekOps; void TRANSPORT;
+
+describe("planfact_update_operation: closed months (PLANFACT_CLOSED_THROUGH)", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("refuses to edit an operation whose current date is in a closed month, no PUT", async () => {
+    vi.stubEnv("PLANFACT_CLOSED_THROUGH", "2026-10");
+    const single = realOp(5, "2026-10-31", UNALLOC, "x");
+    const { handlers, calls } = setup({ single });
+    const res = await run(handlers, { operationId: 5, operationCategoryId: 11, confirmed: true });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/closed period/);
+    expect(puts(calls)).toHaveLength(0);
+  });
+
+  it("refuses moving an open operation into a closed month; allows open ones; skips when unset", async () => {
+    vi.stubEnv("PLANFACT_CLOSED_THROUGH", "2026-10");
+    const single = realOp(5, "2026-11-01", UNALLOC, "x");
+    const a = setup({ single });
+    const res = await run(a.handlers, { operationId: 5, calculationDate: "2026-09-30", confirmed: true });
+    expect(res.isError).toBe(true);
+    expect(puts(a.calls)).toHaveLength(0);
+
+    const b = setup({ single });
+    await run(b.handlers, { operationId: 5, operationCategoryId: 11, confirmed: true });
+    expect(puts(b.calls)).toHaveLength(1);
+
+    vi.stubEnv("PLANFACT_CLOSED_THROUGH", "");
+    const c = setup({ single: realOp(6, "2026-01-15", UNALLOC, "x") });
+    await run(c.handlers, { operationId: 6, operationCategoryId: 11, confirmed: true });
+    expect(puts(c.calls)).toHaveLength(1);
+  });
+});
