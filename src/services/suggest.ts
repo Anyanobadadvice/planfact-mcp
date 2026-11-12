@@ -28,7 +28,7 @@ function isoDay(d: Date): string {
 /** First two unicode-letter words (4..32 letters), at most 80 chars in total. */
 export function significantWords(comment: unknown): string {
   if (typeof comment !== "string") return "";
-  const words = comment.match(/\p{L}{4,32}/gu) ?? [];
+  const words = comment.match(/(?<!\p{L})\p{L}{4,32}(?!\p{L})/gu) ?? [];
   return words.slice(0, 2).join(" ").slice(0, 80);
 }
 
