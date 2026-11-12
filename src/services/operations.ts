@@ -176,6 +176,7 @@ export const PART_FIELDS: PayloadField[] = [
   "calculationDate",
   "projectId",
   "contrAgentId",
+  "isCalculationCommitted",
 ];
 
 function positive(n: unknown): number | undefined {
@@ -210,7 +211,7 @@ export function fieldOf(current: Rec, name: PayloadField): unknown {
     case "calculationDate":
       return current.calculationDate ?? part.calculationDate;
     case "isCalculationCommitted":
-      return current.isCalculationCommitted ?? part.isCalculationCommitted;
+      return part.isCalculationCommitted ?? current.isCalculationCommitted;
     case "value":
       return current.value ?? part.value;
     default:

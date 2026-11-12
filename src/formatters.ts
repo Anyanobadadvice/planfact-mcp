@@ -59,7 +59,7 @@ function stringifyCell(value: unknown): string {
  */
 export function untrusted(s: string): string {
   const safe = String(s)
-    .replace(/[\p{Cf}\u2028\u2029\v]/gu, "")
+    .replace(/[\p{Cf}\u0085\u2028\u2029\v]/gu, "")
     .replace(/\r\n|\r|\n/g, " ")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");

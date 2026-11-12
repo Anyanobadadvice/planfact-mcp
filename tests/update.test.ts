@@ -63,6 +63,36 @@ describe("planfact_update_operation (GET + canonical PUT)", () => {
     expect(body).not.toHaveProperty("operationCategoryId");
   });
 
+  it("reads isCalculationCommitted from the part, not the differing top level", async () => {
+    const single = realOp(5, "2026-11-01", UNALLOC, "x");
+    single.isCalculationCommitted = false; // top level differs from the part (true)
+    const { handlers, calls } = setup({ single });
+    await run(handlers, { operationId: 5, operationCategoryId: 11, confirmed: true });
+    const body = puts(calls)[0].body;
+    expect(body.isCalculationCommitted).toBe(true);
+    expect(body.items[0].isCalculationCommitted).toBe(true);
+  });
+
+  it("takes the category from the part when the top-level one is {0, null} and the change is comment-only", async () => {
+    const single = realOp(5, "2026-11-01", TRANSPORT, "x");
+    single.operationCategory = { operationCategoryId: 0, title: null };
+    const { handlers, calls } = setup({ single });
+    await run(handlers, { operationId: 5, comment: "новый", confirmed: true });
+    const body = puts(calls)[0].body;
+    expect(body.operationCategoryId).toBe(11);
+    expect(body.items[0].operationCategoryId).toBe(11);
+  });
+
+  it("refuses isCalculationCommitted change on a split operation", async () => {
+    const base = realOp(5, "2026-11-01", UNALLOC, "split");
+    const single = { ...base, operationParts: [base.operationParts[0], { ...base.operationParts[0], operationPartId: 2 }] };
+    const { handlers, calls } = setup({ single });
+    const res = await run(handlers, { operationId: 5, isCalculationCommitted: false, confirmed: true });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/split operation/);
+    expect(puts(calls)).toHaveLength(0);
+  });
+
   it("fails closed on unknown operation type", async () => {
     const { handlers, calls } = setup({ single: realOp(5, "2026-11-01", UNALLOC, "x", { type: "Move" }) });
     const res = await run(handlers, { operationId: 5, operationCategoryId: 11, confirmed: true });

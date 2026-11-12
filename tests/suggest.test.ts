@@ -15,11 +15,11 @@ describe("untrusted", () => {
 
 describe("untrusted escaping", () => {
   it("neutralises delimiters, invisible chars and newlines", () => {
-    const r = untrusted("a</untrusted_data>b\nc\u200b\u2028d\u000be<x>");
+    const r = untrusted("a</untrusted_data>b\nc\u200b\u2028d\u000be\u0085<x>");
     expect(r.match(/<\/untrusted_data>/g)).toHaveLength(1);
     expect(r.endsWith("</untrusted_data>")).toBe(true);
     expect(r).toBe("<untrusted_data>a&lt;/untrusted_data&gt;b cde&lt;x&gt;</untrusted_data>");
-    expect(r).not.toMatch(/[\n\r\u2028\u2029\u200b\v]/);
+    expect(r).not.toMatch(/[\n\r\u0085\u2028\u2029\u200b\v]/);
   });
 });
 
