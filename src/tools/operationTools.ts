@@ -17,12 +17,16 @@ import {
   updateOperationSchema,
 } from "../schemas/operations.js";
 import {
-  extractItems,
+  buildUpdatePayload,
   fetchOperation,
-  isUnallocatedCategory,
+  isUnallocatedOperation,
   listAllOperations,
+  loadUnallocatedCategoryIds,
   opCategory,
+  opContrAgent,
+  opId,
   opType,
+  type Changes,
   type Rec,
 } from "../services/operations.js";
 import type { PlanFactClient } from "../services/planfactClient.js";
@@ -83,35 +87,24 @@ Text fields from PlanFact are wrapped in <untrusted_data>; the JSON payload is r
     },
     async (params) => {
       try {
-        // Category list is fetched once per call; ids of «нераспределённые» categories
-        // catch operations that carry only operationCategoryId without a title.
-        const categories = extractItems(
-          await client.request<unknown>("/operationcategories", {
-            query: { "paging.offset": 0, "paging.limit": 1000 },
-          }),
-        );
-        const unallocatedIds = new Set(
-          categories.filter((c) => isUnallocatedCategory({ title: c.title }) && c.title).map((c) => c.id),
-        );
+        // Category list is fetched once per call.
+        const unallocatedIds = await loadUnallocatedCategoryIds(client);
         const operations = await listAllOperations(client, {
           "filter.operationDateStart": params.dateStart,
           "filter.operationDateEnd": params.dateEnd,
           "filter.operationType": ["Income", "Outcome"],
         });
-        const unallocated = operations.filter((o) => {
-          const cat = opCategory(o);
-          return isUnallocatedCategory(cat) || (cat?.id != null && unallocatedIds.has(cat.id));
-        });
+        const unallocated = operations.filter((o) => isUnallocatedOperation(o, unallocatedIds));
         const start = (params.page - 1) * params.pageSize;
         const items = unallocated.slice(start, start + params.pageSize).map((o) => ({
-          id: o.id,
+          id: opId(o),
           operationType: opType(o),
           date: o.operationDate,
           value: o.value,
-          currency: o.currencyCode ?? o.currency ?? o.account?.currencyCode ?? null,
-          account: o.account ?? null,
+          currency: o.account?.currencyCode ?? null,
+          account: o.account ? { id: o.account.accountId, title: o.account.title } : null,
           category: opCategory(o),
-          contrAgent: o.contrAgent ?? null,
+          contrAgent: opContrAgent(o),
           comment: o.comment ?? null,
         }));
         const output = { items, total: unallocated.length, page: params.page };
@@ -155,13 +148,13 @@ Text fields from PlanFact are wrapped in <untrusted_data>; the JSON payload is r
         const operation = await fetchOperation(client, params.operationId);
         const candidates = await suggest(client, operation);
         const summary = {
-          id: operation.id,
+          id: opId(operation),
           operationType: opType(operation),
           date: operation.operationDate,
           value: operation.value,
-          account: operation.account ?? null,
+          account: operation.account ? { id: operation.account.accountId, title: operation.account.title } : null,
           category: opCategory(operation),
-          contrAgent: operation.contrAgent ?? null,
+          contrAgent: opContrAgent(operation),
           comment: operation.comment ?? null,
         };
         const output = { operation: summary, candidates };
@@ -258,14 +251,14 @@ Text fields from PlanFact are wrapped in <untrusted_data>; the JSON payload is r
     },
     async (params) => {
       try {
-        const payload = changedFields(params);
+        const changes = changedFields(params);
 
         if (REQUIRE_CONFIRMATION_FOR_WRITES && !params.confirmed) {
           const output = {
             needs_confirmation: true,
             message: "Confirm with confirmed=true to update this PlanFact operation.",
             operationId: params.operationId,
-            payload,
+            payload: changes,
           };
           return toolSuccess(
             output,
@@ -274,16 +267,23 @@ Text fields from PlanFact are wrapped in <untrusted_data>; the JSON payload is r
           );
         }
 
-        // Safe update: GET the current operation, merge only the passed fields, PUT the whole object.
+        // Safe update: GET the current operation, build the canonical PUT body from a fixed field list.
         const current = await fetchOperation(client, params.operationId);
+        const type = opType(current);
+        if (type !== "Income" && type !== "Outcome") {
+          throw new Error(`Cannot update operation ${params.operationId}: unsupported operationType "${type ?? "unknown"}".`);
+        }
+        if (params.operationType !== undefined && params.operationType !== type) {
+          throw new Error(
+            `operationType mismatch: operation ${params.operationId} is ${type}, request says ${params.operationType}.`,
+          );
+        }
         const endpoint =
-          (params.operationType ?? opType(current)) === "Outcome"
-            ? PLANFACT_OUTCOME_OPERATION_PATH
-            : PLANFACT_INCOME_OPERATION_PATH;
-        const { merged, before, after } = mergeOperation(current, params);
+          type === "Outcome" ? PLANFACT_OUTCOME_OPERATION_PATH : PLANFACT_INCOME_OPERATION_PATH;
+        const { body, before, after } = buildUpdatePayload(current, changes);
         const data = await client.request<unknown>(`${endpoint}/${params.operationId}`, {
           method: "PUT",
-          body: merged,
+          body,
         });
         return toolSuccess(
           { updated: true, before, after, operation: data },
@@ -429,71 +429,24 @@ function wrapStrings(o: Rec): Rec {
   );
 }
 
-const UPDATABLE_FIELDS = [
-  "operationType",
-  "operationDate",
-  "accountId",
-  "value",
-  "comment",
-  "calculationDate",
-  "isCommitted",
-  "isCalculationCommitted",
-  "contrAgentId",
-  "operationCategoryId",
-  "projectId",
-] as const;
-
-function changedFields(params: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const key of UPDATABLE_FIELDS) if (params[key] !== undefined) out[key] = params[key];
+/** Fields the caller asked to change (operationType is a guard, never sent). */
+function changedFields(params: Record<string, unknown>): Changes {
+  const out: Changes = {};
+  for (const key of [
+    "operationDate",
+    "accountId",
+    "value",
+    "comment",
+    "calculationDate",
+    "isCommitted",
+    "isCalculationCommitted",
+    "contrAgentId",
+    "operationCategoryId",
+    "projectId",
+  ] as const) {
+    if (params[key] !== undefined) out[key] = params[key];
+  }
   return out;
-}
-
-// Fields that PlanFact also keeps on each item of a single-item operation.
-const ITEM_FIELDS = ["value", "calculationDate", "isCalculationCommitted", "contrAgentId", "operationCategoryId", "projectId"];
-
-const NESTED_ID: Record<string, string> = {
-  operationCategoryId: "operationCategory",
-  contrAgentId: "contrAgent",
-  accountId: "account",
-  projectId: "project",
-};
-
-/** Flat field, else the id of the nested object (GET returns operationCategory: {id,title}), else the first item. */
-function currentValue(current: Rec, key: string): unknown {
-  if (current[key] !== undefined && current[key] !== null) return current[key];
-  const nested = NESTED_ID[key];
-  if (nested && current[nested]?.id !== undefined) return current[nested].id;
-  if (Array.isArray(current.items) && current.items.length === 1) return current.items[0]?.[key];
-  return current[key];
-}
-
-/** Merge only the passed fields into the current operation; report before/after of what actually changed. */
-function mergeOperation(
-  current: Rec,
-  params: Record<string, unknown>,
-): { merged: Rec; before: Rec; after: Rec } {
-  const changes = changedFields(params);
-  delete changes.operationType; // type is defined by the endpoint, not the body
-  const merged: Rec = { ...current };
-  const before: Rec = {};
-  const after: Rec = {};
-  for (const [key, value] of Object.entries(changes)) {
-    const old = currentValue(current, key);
-    if (JSON.stringify(old) === JSON.stringify(value)) continue;
-    before[key] = old ?? null;
-    after[key] = value;
-    merged[key] = value;
-  }
-  if (Array.isArray(current.items) && current.items.length === 1) {
-    merged.items = [
-      {
-        ...current.items[0],
-        ...Object.fromEntries(Object.entries(after).filter(([k]) => ITEM_FIELDS.includes(k))),
-      },
-    ];
-  }
-  return { merged, before, after };
 }
 
 function buildOperationFilterQuery(params: Record<string, unknown>): Record<string, unknown> {

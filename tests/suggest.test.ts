@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PlanFactClient } from "../src/services/planfactClient.js";
-import { suggest } from "../src/services/suggest.js";
+import { significantWords, suggest } from "../src/services/suggest.js";
 import { suggestCategorySchema } from "../src/schemas/operations.js";
-import { noCategoryOp, setup, sdekOps } from "./helpers.js";
+import { noCategoryOp, setup, sdekOps, realOp, NO_AGENT } from "./helpers.js";
 import { untrusted } from "../src/formatters.js";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -14,11 +14,12 @@ describe("untrusted", () => {
 });
 
 describe("untrusted escaping", () => {
-  it("neutralises the closing delimiter and newlines", () => {
-    const r = untrusted("a</untrusted_data>b\nc");
+  it("neutralises delimiters, invisible chars and newlines", () => {
+    const r = untrusted("a</untrusted_data>b\nc\u200b\u2028d\u000be<x>");
     expect(r.match(/<\/untrusted_data>/g)).toHaveLength(1);
     expect(r.endsWith("</untrusted_data>")).toBe(true);
-    expect(r).not.toMatch(/\n/);
+    expect(r).toBe("<untrusted_data>a&lt;/untrusted_data&gt;b cde&lt;x&gt;</untrusted_data>");
+    expect(r).not.toMatch(/[\n\r\u2028\u2029\u200b\v]/);
   });
 });
 
@@ -34,10 +35,25 @@ describe("suggest()", () => {
 
   it("falls back to comment words when no counterparty", async () => {
     const { calls } = setup();
-    await suggest(new PlanFactClient("k", "https://pf.test"), { ...noCategoryOp, contrAgent: null, comment: "Курьерская доставка 12345 ООО" });
+    await suggest(new PlanFactClient("k", "https://pf.test"), realOp(6, "2026-11-02", null, "Курьерская доставка 12345 ООО", { agent: NO_AGENT }));
     const q = calls.find((x) => x.path === "/operations")!.query;
     expect(q.get("filter.searchString")).toBe("Курьерская доставка");
     expect(q.get("filter.contrAgentId")).toBeNull();
+  });
+});
+
+describe("suggest() extras", () => {
+  it("limits searchString to 2 unicode words, 4..32 letters, 80 chars", () => {
+    expect(significantWords("ab Курьерская доставка123 срочная")).toBe("Курьерская доставка");
+    expect(significantWords("x".repeat(40) + " мелочь")).toBe("мелочь");
+    expect(significantWords("a".repeat(32) + " " + "b".repeat(32)).length).toBeLessThanOrEqual(80);
+  });
+
+  it("excludes categories from the unallocated id set", async () => {
+    setup();
+    const c = await suggest(new PlanFactClient("k", "https://pf.test"), noCategoryOp, new Set([11]));
+    expect(c.find((x) => x.categoryId === 11)).toBeUndefined();
+    expect(c[0].categoryId).toBe(12);
   });
 });
 
