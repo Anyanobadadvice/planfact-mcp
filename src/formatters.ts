@@ -53,7 +53,10 @@ function stringifyCell(value: unknown): string {
   return String(value).replace(/\|/g, "\\|");
 }
 
-/** Marks externally-sourced text (comments, counterparty names) as data, not instructions. */
+/** Marks externally-sourced text (comments, names) as data, not instructions. Neutralises the delimiter and line breaks. */
 export function untrusted(s: string): string {
-  return `<untrusted_data>${s}</untrusted_data>`;
+  const safe = String(s)
+    .replace(/<\/?untrusted_data/gi, (m) => `&lt;${m.slice(1)}`)
+    .replace(/\r\n|\r|\n/g, " ");
+  return `<untrusted_data>${safe}</untrusted_data>`;
 }

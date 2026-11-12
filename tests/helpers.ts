@@ -39,7 +39,7 @@ export const categories = [TRANSPORT, PACKING, UNALLOC].map((c) => ({ ...c, acti
 
 export const allOps: Op[] = [...sdekOps, noCategoryOp];
 
-export function setup(opts: { ops?: Op[]; single?: Op; singleType?: "income" | "outcome" } = {}) {
+export function setup(opts: { ops?: Op[]; single?: Op; } = {}) {
   const calls: Call[] = [];
   const ops = opts.ops ?? allOps;
   const fetchMock = vi.fn(async (input: any, init: any = {}) => {
@@ -56,18 +56,13 @@ export function setup(opts: { ops?: Op[]; single?: Op; singleType?: "income" | "
       const items = ops.filter((o) => !cid || String(o.contrAgent?.id) === cid);
       return json({ items });
     }
-    const m = path.match(/^\/operations\/(income|outcome)\/(\d+)$/);
-    if (m) {
-      const single = opts.single ?? ops.find((o) => o.id === Number(m[2]));
-      const type = opts.singleType ?? "outcome";
-      if (method === "GET") {
-        if (!single || m[1] !== type) {
-          return new Response(JSON.stringify({ isSuccess: false, errorMessage: "not found" }), { status: 404 });
-        }
-        return json(single);
-      }
-      if (method === "PUT") return json({ id: Number(m[2]), ...body });
+    const g = path.match(/^\/operations\/(\d+)$/);
+    if (g && method === "GET") {
+      const single = opts.single ?? ops.find((o) => o.id === Number(g[1]));
+      return single ? json(single) : new Response(JSON.stringify({ isSuccess: true }), { status: 200 });
     }
+    const m = path.match(/^\/operations\/(income|outcome)\/(\d+)$/);
+    if (m && method === "PUT") return json({ id: Number(m[2]), ...body });
     return new Response("{}", { status: 404 });
   });
   vi.stubGlobal("fetch", fetchMock);

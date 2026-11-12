@@ -1,7 +1,3 @@
-import {
-  PLANFACT_INCOME_OPERATION_PATH,
-  PLANFACT_OUTCOME_OPERATION_PATH,
-} from "../constants.js";
 import type { PlanFactClient } from "./planfactClient.js";
 
 export type Rec = Record<string, any>;
@@ -56,32 +52,10 @@ export async function listAllOperations(
   return all;
 }
 
-/**
- * Single-operation GET: `${endpoint}/${id}`. The operation type is unknown to the caller,
- * so income is tried first and outcome second.
- */
-export async function fetchOperation(
-  client: PlanFactClient,
-  operationId: number,
-  operationType?: "Income" | "Outcome",
-): Promise<{ operation: Rec; endpoint: string }> {
-  const candidates =
-    operationType === "Outcome"
-      ? [PLANFACT_OUTCOME_OPERATION_PATH]
-      : operationType === "Income"
-        ? [PLANFACT_INCOME_OPERATION_PATH]
-        : [PLANFACT_INCOME_OPERATION_PATH, PLANFACT_OUTCOME_OPERATION_PATH];
-  let lastError: unknown;
-  for (const endpoint of candidates) {
-    try {
-      const data = await client.request<unknown>(`${endpoint}/${operationId}`);
-      const operation = isRecord(data) && isRecord(data.data) ? data.data : data;
-      if (isRecord(operation)) return { operation, endpoint };
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError instanceof Error
-    ? new Error(`Operation ${operationId} not found: ${lastError.message}`)
-    : new Error(`Operation ${operationId} not found`);
+/** Single-operation GET: `/operations/{id}` (verified on live PlanFact API). */
+export async function fetchOperation(client: PlanFactClient, operationId: number): Promise<Rec> {
+  const data = await client.request<unknown>(`/operations/${operationId}`);
+  const operation = isRecord(data) && isRecord(data.data) ? data.data : null;
+  if (!operation) throw new Error(`Operation ${operationId} not found`);
+  return operation;
 }
