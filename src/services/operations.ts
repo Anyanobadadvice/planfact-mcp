@@ -223,7 +223,7 @@ export type Changes = Partial<Record<PayloadField, unknown>>;
 
 /**
  * Refuses edits touching a closed month: the current operationDate / calculationDate
- * (top level or operationParts[0]) or the new ones in `changes`, month <= closedThrough (YYYY-MM).
+ * (top level or any of operationParts[]) or the new ones in `changes`, month <= closedThrough (YYYY-MM).
  * closedThrough unset -> no check.
  */
 export function assertOpenPeriod(
@@ -232,14 +232,14 @@ export function assertOpenPeriod(
   closedThrough: string | undefined = process.env.PLANFACT_CLOSED_THROUGH,
 ): void {
   if (!closedThrough || !/^\d{4}-\d{2}$/.test(closedThrough)) return;
-  const part = opParts(current)[0] ?? {};
-  const dates = [
+  const dates: Array<readonly [string, unknown]> = [
     ["current operationDate", current.operationDate],
     ["current calculationDate", current.calculationDate],
-    ["current calculationDate", part.calculationDate],
+    // every part: a split operation with one older part is also closed
+    ...opParts(current).map((p) => ["current part calculationDate", p.calculationDate] as const),
     ["new operationDate", changes.operationDate],
     ["new calculationDate", changes.calculationDate],
-  ] as const;
+  ];
   for (const [label, d] of dates) {
     if (typeof d === "string" && /^\d{4}-\d{2}/.test(d) && d.slice(0, 7) <= closedThrough) {
       throw new Error(`closed period: ${label} ${d.slice(0, 10)} is in a closed month (through ${closedThrough})`);

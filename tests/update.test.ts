@@ -173,3 +173,21 @@ describe("planfact_update_operation: closed months (PLANFACT_CLOSED_THROUGH)", (
     expect(puts(c.calls)).toHaveLength(1);
   });
 });
+
+describe("planfact_update_operation: closed months on split operations", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("refuses when only the second part's calculationDate is in a closed month", async () => {
+    vi.stubEnv("PLANFACT_CLOSED_THROUGH", "2026-10");
+    const base = realOp(5, "2026-11-05", UNALLOC, "split");
+    const single = {
+      ...base,
+      operationParts: [base.operationParts[0], { ...base.operationParts[0], operationPartId: 2, calculationDate: "2026-10-20" }],
+    };
+    const { handlers, calls } = setup({ single });
+    const res = await run(handlers, { operationId: 5, comment: "новый", confirmed: true });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/closed period/);
+    expect(puts(calls)).toHaveLength(0);
+  });
+});
