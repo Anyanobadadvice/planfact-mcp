@@ -3,6 +3,7 @@ import { z } from "zod";
 import { markdownTable, toolError, toolSuccess } from "../formatters.js";
 import { dateStringSchema, responseFormatSchema } from "../schemas/common.js";
 import type { PlanFactClient } from "../services/planfactClient.js";
+import { loadCategoryTitles, loadProjectTitles, summarizeHistory, type HistorySummary } from "../services/history.js";
 
 const periodAnalysisSchema = z
   .object({
@@ -47,7 +48,8 @@ export function registerAnalysisTools(server: McpServer, client: PlanFactClient)
     "planfact_get_income_outcome_by_categories",
     {
       title: "Get Income Outcome By Categories",
-      description: "Get income/outcome history grouped by operation categories for a period. Useful for monthly expense analysis.",
+      description:
+        "Доходы и расходы по статьям за период, свёрнуто по статье (без построчных деталей). isCalculation: true — по дате начисления (ОПИУ), false — по дате оплаты (ДДС). Поле opu — итоги только по статьям класса Income/Outcome, без движения активов, кредитов и дивидендов.",
       inputSchema: periodAnalysisSchema,
       annotations: {
         readOnlyHint: true,
@@ -58,14 +60,13 @@ export function registerAnalysisTools(server: McpServer, client: PlanFactClient)
     },
     async (params) => {
       try {
-        const data = await client.request<unknown>("/bizinfos/incomeoutcomehistorybyoperationcategories", {
-          query: periodQuery(params),
-        });
-        const rows = extractRows(data);
-        const text = rows.length
-          ? markdownTable(rows as Array<Record<string, unknown>>, ["title", "income", "outcome", "value"])
-          : JSON.stringify(data, null, 2);
-        return toolSuccess({ rows, raw: data }, text, params.response_format);
+        const [data, titles] = await Promise.all([
+          client.request<unknown>("/bizinfos/incomeoutcomehistorybyoperationcategories", { query: periodQuery(params) }),
+          loadCategoryTitles(client),
+        ]);
+        const summary = summarizeHistory(data, "operationCategoryId", titles);
+        const output = historyOutput(params, summary, "статьям");
+        return toolSuccess(output, historyText(output), params.response_format);
       } catch (error) {
         return toolError(error);
       }
@@ -76,7 +77,7 @@ export function registerAnalysisTools(server: McpServer, client: PlanFactClient)
     "planfact_get_income_outcome_by_projects",
     {
       title: "Get Income Outcome By Projects",
-      description: "Get income/outcome history grouped by projects for a period. Useful for deciding which work is profitable.",
+      description: "Доходы и расходы по проектам за период, свёрнуто по проекту. isCalculation: true — по начислению, false — по оплате.",
       inputSchema: periodAnalysisSchema,
       annotations: {
         readOnlyHint: true,
@@ -87,19 +88,52 @@ export function registerAnalysisTools(server: McpServer, client: PlanFactClient)
     },
     async (params) => {
       try {
-        const data = await client.request<unknown>("/bizinfos/incomeoutcomehistorybyprojects", {
-          query: periodQuery(params),
-        });
-        const rows = extractRows(data);
-        const text = rows.length
-          ? markdownTable(rows as Array<Record<string, unknown>>, ["title", "income", "outcome", "value"])
-          : JSON.stringify(data, null, 2);
-        return toolSuccess({ rows, raw: data }, text, params.response_format);
+        const [data, titles] = await Promise.all([
+          client.request<unknown>("/bizinfos/incomeoutcomehistorybyprojects", { query: periodQuery(params) }),
+          loadProjectTitles(client),
+        ]);
+        const summary = summarizeHistory(data, "projectId", titles);
+        const output = historyOutput(params, summary, "проектам");
+        return toolSuccess(output, historyText(output), params.response_format);
       } catch (error) {
         return toolError(error);
       }
     },
   );
+}
+
+type HistoryOutput = {
+  period: { start: string; end: string };
+  basis: "accrual" | "cash";
+  groupedBy: string;
+  rows: HistorySummary["rows"];
+  totals: HistorySummary["totals"];
+  opu: HistorySummary["opu"];
+  entries: number;
+};
+
+function historyOutput(params: Record<string, unknown>, summary: HistorySummary, groupedBy: string): HistoryOutput {
+  return {
+    period: { start: String(params.periodStartDate), end: String(params.periodEndDate) },
+    basis: params.isCalculation ? "accrual" : "cash",
+    groupedBy,
+    rows: summary.rows,
+    totals: summary.totals,
+    opu: summary.opu,
+    entries: summary.entries,
+  };
+}
+
+function historyText(out: HistoryOutput): string {
+  const head = `${out.basis === "accrual" ? "ОПИУ (по начислению)" : "ДДС (по оплате)"} по ${out.groupedBy}, ${out.period.start} — ${out.period.end}`;
+  if (out.rows.length === 0) return `${head}\n\nNo records found.`;
+  const table = markdownTable(
+    out.rows.map((r) => ({ title: r.title, type: r.type ?? "", income: r.income, outcome: r.outcome, net: r.net })),
+    ["title", "type", "income", "outcome", "net"],
+  );
+  const opu = `Итого по статьям Income/Outcome: доход ${out.opu.income}, расход ${out.opu.outcome}, результат ${out.opu.net}`;
+  const all = `Итого по всем строкам: доход ${out.totals.income}, расход ${out.totals.outcome}, результат ${out.totals.net}`;
+  return [head, "", table, "", opu, all].join("\n");
 }
 
 function periodQuery(params: Record<string, unknown>): Record<string, unknown> {
@@ -110,16 +144,4 @@ function periodQuery(params: Record<string, unknown>): Record<string, unknown> {
     "filter.isCalculation": params.isCalculation,
     "filter.ignoreMove": params.ignoreMove,
   };
-}
-
-function extractRows(data: unknown): unknown[] {
-  if (Array.isArray(data)) return data;
-  if (!data || typeof data !== "object") return [];
-
-  const record = data as Record<string, unknown>;
-  for (const key of ["items", "data", "history", "rows", "categories", "projects"]) {
-    if (Array.isArray(record[key])) return record[key] as unknown[];
-  }
-
-  return [];
 }
