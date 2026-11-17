@@ -5,7 +5,10 @@ import { untrusted } from "../formatters.js";
 
 /** Статьи выручки ПФ: «Производство и продажа» + «Продажа товаров». */
 export const REVENUE_CATEGORY_IDS = [2945160, 10087234] as const;
-export const LIST_CAP = 50;
+export const LIST_CAP = 20;
+export const GROUP_CAP = 15;
+export const TITLE_CAP = 80;
+export const RESPONSE_BUDGET = 7500;
 export const OPS_PAGE_LIMIT = 500;
 
 export const round2 = (x: number): number => Math.round(x * 100) / 100;
@@ -93,7 +96,25 @@ export async function fetchMonthOperations(client: PlanFactClient, ym: string, o
 }
 
 const day = (v: unknown): string => (typeof v === "string" ? v.slice(0, 10) : "");
-const agentTitle = (a: unknown): string => (a && typeof a === "object" && typeof (a as Rec).title === "string" ? ((a as Rec).title as string) : "");
+const clip = (t: string): string => (t.length > TITLE_CAP ? `${t.slice(0, TITLE_CAP)}…` : t);
+const agentTitle = (a: unknown): string => (a && typeof a === "object" && typeof (a as Rec).title === "string" ? clip((a as Rec).title as string) : "");
+
+/**
+ * Держит ответ в бюджете: меряет pretty-JSON (текст) + compact (structuredContent) и, пока не влезает,
+ * убирает хвост самого длинного списка из `lists`, выставляя `truncated` (для byContrAgent — `groupsTruncated`).
+ */
+export function fitBudget<T extends Record<string, any>>(out: T, lists: string[], budget = RESPONSE_BUDGET): T {
+  const size = () => JSON.stringify(out, null, 2).length + JSON.stringify(out).length;
+  while (size() > budget) {
+    let best: string | null = null;
+    for (const k of lists) if (Array.isArray(out[k]) && out[k].length > 0 && (best === null || out[k].length > out[best].length)) best = k;
+    if (best === null) break;
+    out[best].pop();
+    if (best === "byContrAgent") (out as any).groupsTruncated = true;
+    else (out as any).truncated = true;
+  }
+  return out;
+}
 
 export type ReceivableItem = { operationId: number | undefined; operationDate: string; value: number; contrAgent: string | null };
 export type ReceivablesResult = {
@@ -101,6 +122,8 @@ export type ReceivablesResult = {
   count: number;
   total: number;
   byContrAgent: Array<{ contrAgent: string; count: number; total: number }>;
+  /** Хвост групп свёрнут в «прочие» (sum сохранена) или отрезан бюджетом ответа. */
+  groupsTruncated: boolean;
   items: ReceivableItem[];
   truncated: boolean;
 };
@@ -128,11 +151,14 @@ export async function receivables(client: PlanFactClient, ym: string): Promise<R
     g.total = round2(g.total + value);
     groups.set(key, g);
   }
-  const byContrAgent = [...groups.entries()]
-    .map(([contrAgent, g]) => ({ contrAgent, ...g }))
-    .sort((a, b) => Math.abs(b.total) - Math.abs(a.total))
-    .slice(0, LIST_CAP);
-  return { month: ym, count: items.length, total: round2(total), byContrAgent, items: items.slice(0, LIST_CAP), truncated: items.length > LIST_CAP };
+  const sorted = [...groups.entries()].map(([contrAgent, g]) => ({ contrAgent, ...g })).sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
+  const byContrAgent = sorted.slice(0, GROUP_CAP);
+  const tail = sorted.slice(GROUP_CAP);
+  const groupsTruncated = tail.length > 0;
+  if (groupsTruncated) {
+    byContrAgent.push({ contrAgent: "прочие", count: tail.reduce((a, g) => a + g.count, 0), total: round2(tail.reduce((a, g) => a + g.total, 0)) });
+  }
+  return { month: ym, count: items.length, total: round2(total), byContrAgent, groupsTruncated, items: items.slice(0, LIST_CAP), truncated: items.length > LIST_CAP };
 }
 
 export type CdekItem = { operationId: number | undefined; operationDate: string; value: number; calculationDate: string | null };
@@ -175,8 +201,8 @@ function payrollKey(title: string): keyof Payroll | null {
   if (t === "производственный персонал") return "production";
   if (t === "коммерческий персонал") return "commercial";
   if (t === "административный персонал") return "admin";
-  if (t.includes("директора")) return "director";
   if (/налог по зп/.test(t)) return "payrollTax";
+  if (t.includes("директора")) return "director";
   return null;
 }
 

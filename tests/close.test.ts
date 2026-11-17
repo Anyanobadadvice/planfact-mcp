@@ -125,13 +125,40 @@ describe("receivables", () => {
     expect(r.items[0].contrAgent).toBe(untrusted("Клиент <A>"));
   });
 
-  it("список ограничен 50 и помечен truncated", async () => {
+  it("список ограничен 20 и помечен truncated", async () => {
     const ops = Array.from({ length: 60 }, (_, i) => op(i + 1, {}, [part(i + 1, { isCalculationCommitted: false })]));
     const { client } = setup(ops);
     const r = await receivables(client, "2026-10");
     expect(r.count).toBe(60);
-    expect(r.items).toHaveLength(50);
+    expect(r.items).toHaveLength(20);
     expect(r.truncated).toBe(true);
+  });
+});
+
+describe("receivables groups and size", () => {
+  const long = (i: number) => `Очень длинное название контрагента номер ${i} `.repeat(8);
+  const worst = () =>
+    Array.from({ length: 60 }, (_, i) =>
+      op(i + 1, { contrAgent: { contrAgentId: i + 1, title: long(i) } }, [part(i + 1, { isCalculationCommitted: false, value: 100 + i })]),
+    );
+
+  it("хвост групп сворачивается в «прочие» с суммой и флагом groupsTruncated", async () => {
+    const { client } = setup(worst());
+    const r = await receivables(client, "2026-10");
+    expect(r.groupsTruncated).toBe(true);
+    expect(r.byContrAgent).toHaveLength(16);
+    expect(r.byContrAgent[15].contrAgent).toBe("прочие");
+    expect(r.byContrAgent[15].count).toBe(45);
+    expect(r.byContrAgent.reduce((a, g) => a + g.total, 0)).toBeCloseTo(r.total, 2);
+  });
+
+  it("худший случай (60 операций, длинные названия) < 8000 символов в json и markdown", async () => {
+    const { handlers } = setup(worst());
+    for (const response_format of ["json", "markdown"]) {
+      const r = await handlers.planfact_receivables({ month: "2026-10", response_format });
+      expect(r.content[0].text.length).toBeLessThan(8000);
+      expect(JSON.stringify(r.structuredContent).length + r.content[0].text.length).toBeLessThan(16000);
+    }
   });
 });
 
@@ -154,7 +181,31 @@ describe("cdekUnaccrued", () => {
   });
 });
 
+describe("cdek size", () => {
+  it("худший случай < 8000 символов в json и markdown", async () => {
+    const cdek = { contrAgentId: 77, title: "СДЭК ".repeat(40) };
+    const ops = Array.from({ length: 60 }, (_, i) => op(i + 1, { operationType: "Outcome" }, [part(i + 1, { contrAgent: cdek, isCalculationCommitted: false })]));
+    const { handlers } = setup(ops);
+    for (const response_format of ["json", "markdown"]) {
+      const r = await handlers.planfact_cdek_unaccrued({ month: "2026-10", response_format });
+      expect(r.content[0].text.length).toBeLessThan(8000);
+      expect(r.structuredContent.truncated).toBe(true);
+      expect(r.structuredContent.count).toBe(60);
+    }
+  });
+});
+
 describe("preflight", () => {
+  it("«Налог по ЗП директора» относится к налогу, а не к директору", async () => {
+    categories.push({ operationCategoryId: 8, title: "Налог по ЗП директора" });
+    const h = { ...history, data: [...history.data, { operationCategoryId: 8, details: [detail(2, 7)] }] };
+    const { client } = setup([], h);
+    const r = await preflight(client, "2026-10");
+    categories.pop();
+    expect(r.payroll.payrollTax).toBe(7);
+    expect(r.payroll.director).toBe(40);
+  });
+
   it("ЗП по статьям, нули = не начислена, нераспределённые, prevMonthClosed", async () => {
     process.env.PLANFACT_CLOSED_THROUGH = "2026-09";
     const ops = [op(1, {}, [part(1, { operationCategory: { operationCategoryId: 99, title: "Нераспределённый расход" } })]), op(2)];

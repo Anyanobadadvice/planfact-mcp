@@ -3,7 +3,7 @@ import { z } from "zod";
 import { markdownTable, toolError, toolSuccess } from "../formatters.js";
 import { responseFormatSchema } from "../schemas/common.js";
 import type { PlanFactClient } from "../services/planfactClient.js";
-import { cdekUnaccrued, preflight, receivables, revenueCheck } from "../services/close.js";
+import { cdekUnaccrued, fitBudget, preflight, receivables, revenueCheck } from "../services/close.js";
 
 const monthSchema = z
   .string()
@@ -38,15 +38,15 @@ export function registerCloseTools(server: McpServer, client: PlanFactClient): v
     {
       title: "Receivables for month close",
       description:
-        "Дебиторка месяца (3.2): оплаченные операции, у которых часть не начислена (operationParts[].isCalculationCommitted=false). Сгруппировано по контрагенту, до 50 строк. Названия обёрнуты в <untrusted_data>. Только чтение.",
+        "Дебиторка месяца (3.2): оплаченные операции, у которых часть не начислена (operationParts[].isCalculationCommitted=false). Сгруппировано по контрагенту, до 20 строк. Названия обёрнуты в <untrusted_data>. Только чтение.",
       inputSchema: z.object({ month: monthSchema, response_format: responseFormatSchema }).strict(),
       annotations: readOnly,
     },
     async (p) => {
       try {
-        const r = await receivables(client, p.month);
+        const r = fitBudget(await receivables(client, p.month), ["items", "byContrAgent"]);
         const text = [
-          `Дебиторка ${r.month}: ${r.count} операций на ${r.total}${r.truncated ? " (список обрезан до 50)" : ""}`,
+          `Дебиторка ${r.month}: ${r.count} операций на ${r.total}${r.truncated ? " (список обрезан)" : ""}`,
           "",
           markdownTable(r.byContrAgent as unknown as Array<Record<string, unknown>>, ["contrAgent", "count", "total"]),
         ].join("\n");
@@ -62,15 +62,15 @@ export function registerCloseTools(server: McpServer, client: PlanFactClient): v
     {
       title: "СДЭК payments without accrual",
       description:
-        "Платежи контрагента «СДЭК» (outcome) в месяце без начисления в этом месяце (3.7): часть не начислена или calculationDate вне месяца. До 50 строк. Только чтение.",
+        "Платежи контрагента «СДЭК» (outcome) в месяце без начисления в этом месяце (3.7): часть не начислена или calculationDate вне месяца. До 20 строк. Только чтение.",
       inputSchema: z.object({ month: monthSchema, response_format: responseFormatSchema }).strict(),
       annotations: readOnly,
     },
     async (p) => {
       try {
-        const r = await cdekUnaccrued(client, p.month);
+        const r = fitBudget(await cdekUnaccrued(client, p.month), ["items"]);
         const text = [
-          `СДЭК без начисления ${r.month}: ${r.count} платежей на ${r.total}${r.truncated ? " (список обрезан до 50)" : ""}`,
+          `СДЭК без начисления ${r.month}: ${r.count} платежей на ${r.total}${r.truncated ? " (список обрезан)" : ""}`,
           "",
           markdownTable(r.items as unknown as Array<Record<string, unknown>>, ["operationId", "operationDate", "value", "calculationDate"]),
         ].join("\n");
