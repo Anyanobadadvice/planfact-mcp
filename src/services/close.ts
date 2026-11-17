@@ -230,3 +230,161 @@ export async function preflight(client: PlanFactClient, ym: string): Promise<Pre
   const unallocated = ops.filter((o) => (o.operationType ? o.operationType !== "Move" : true) && isUnallocatedOperation(o, unallocIds)).length;
   return { month: ym, unallocated, payroll, prevMonthClosed: prevMonthClosed(ym) };
 }
+
+// ---------- Перенос выручки (4.1): порт defer-revenue.mjs ----------
+
+export type DeferPick = { operationId: number | undefined; operationDate: string; value: number; account: string; category: string };
+export type DeferPlan = {
+  month: string;
+  msRevenue: number;
+  pfRevenue: number;
+  target: number;
+  needDefer: boolean;
+  nextMonthEnd: string;
+  pick: DeferPick[];
+  picked: number;
+  pickedSum: number;
+  overshoot: number;
+  shortfall: number;
+  multiSkipped: { count: number; sum: number };
+  candidates: number;
+  /** Исходные операции выбранных (для записи и бэкапа); наружу в ответ инструмента не отдаются. */
+  raw: Rec[];
+};
+
+const isRevenueCat = (p: Rec): boolean => REVENUE_CATEGORY_IDS.includes(Number(p.operationCategory?.operationCategoryId) as 2945160 | 10087234);
+const partValue = (x: Rec): number => num(x.valueInUserCurrency ?? x.value);
+const titleOf = (v: unknown): string => (v && typeof v === "object" && typeof (v as Rec).title === "string" ? clip((v as Rec).title as string) : "");
+
+export async function deferPlan(client: PlanFactClient, ym: string, msRevenue: number): Promise<DeferPlan> {
+  const pfRevenue = await revenueAccrued(client, ym);
+  const target = round2(pfRevenue - msRevenue);
+  const nextMonthEnd = monthBounds(nextMonth(ym)).end;
+  const base: DeferPlan = {
+    month: ym, msRevenue: round2(msRevenue), pfRevenue, target, needDefer: false, nextMonthEnd,
+    pick: [], picked: 0, pickedSum: 0, overshoot: 0, shortfall: 0, multiSkipped: { count: 0, sum: 0 }, candidates: 0, raw: [],
+  };
+  if (target <= 0) return base;
+
+  const ops = await fetchMonthOperations(client, ym, "Income");
+  const cands: Array<{ o: Rec; x: Rec; v: number }> = [];
+  let multiCount = 0;
+  let multiSum = 0;
+  for (const o of ops) {
+    const parts = opParts(o);
+    if (parts.length > 1) {
+      if (parts.some(isRevenueCat)) {
+        multiCount++;
+        multiSum += parts.filter(isRevenueCat).reduce((s, p) => s + partValue(p), 0);
+      }
+      continue;
+    }
+    if (parts.length !== 1) continue;
+    const x = parts[0];
+    if (!isRevenueCat(x) || x.isCalculationCommitted !== true || !day(x.calculationDate).startsWith(ym)) continue;
+    cands.push({ o, x, v: partValue(x) });
+  }
+  cands.sort((a, b) => day(b.o.operationDate).localeCompare(day(a.o.operationDate)) || b.v - a.v);
+
+  const picked: typeof cands = [];
+  let acc = 0;
+  for (const c of cands) {
+    if (acc >= target) break;
+    picked.push(c);
+    acc += c.v;
+  }
+  if (acc >= target && picked.length > 0) {
+    // добивка: заменить последнюю выбранную минимальной из неиспользованных, всё ещё закрывающей остаток
+    const last = picked.pop()!;
+    const accPrev = acc - last.v;
+    const need = target - accPrev;
+    let best = last;
+    for (const c of cands) {
+      if (picked.includes(c)) continue;
+      if (c.v >= need && c.v < best.v) best = c;
+    }
+    picked.push(best);
+    acc = accPrev + best.v;
+  }
+  const pick: DeferPick[] = picked.map(({ o, x, v }) => ({
+    operationId: opId(o),
+    operationDate: day(o.operationDate),
+    value: round2(v),
+    account: untrusted(titleOf(o.account)),
+    category: untrusted(titleOf(x.operationCategory)),
+  }));
+  return {
+    ...base,
+    needDefer: true,
+    pick,
+    picked: picked.length,
+    pickedSum: round2(acc),
+    overshoot: round2(Math.max(0, acc - target)),
+    shortfall: round2(Math.max(0, target - acc)),
+    multiSkipped: { count: multiCount, sum: round2(multiSum) },
+    candidates: cands.length,
+    raw: picked.map((c) => c.o),
+  };
+}
+
+function nextMonth(ym: string): string {
+  const [y, m] = ym.split("-").map(Number);
+  return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`;
+}
+
+export type DeferResult = { ok: number; failed: Array<{ id: number | undefined; err: string }>; after: { pfRevenue: number; msRevenue: number; delta: number } };
+
+/** Запись переноса: PUT полным payload по каждой выбранной операции; сбой одной не останавливает остальные. */
+export async function applyDefer(client: PlanFactClient, plan: DeferPlan): Promise<DeferResult> {
+  let ok = 0;
+  const failed: DeferResult["failed"] = [];
+  for (const o of plan.raw) {
+    const id = opId(o);
+    try {
+      const x = opParts(o)[0];
+      const contrAgentId = x.contrAgent?.contrAgentId;
+      const operationCategoryId = x.operationCategory?.operationCategoryId;
+      await client.request(`/operations/income/${id}`, {
+        method: "PUT",
+        body: {
+          operationDate: o.operationDate,
+          calculationDate: plan.nextMonthEnd,
+          isCalculationCommitted: false,
+          accountId: o.account?.accountId,
+          value: o.value,
+          comment: o.comment,
+          isCommitted: o.isCommitted ?? true,
+          contrAgentId,
+          operationCategoryId,
+          items: [
+            { calculationDate: plan.nextMonthEnd, isCalculationCommitted: false, value: x.value, contrAgentId, operationCategoryId, projectId: x.project?.projectId },
+          ],
+        },
+      });
+      ok++;
+    } catch (e) {
+      failed.push({ id, err: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  const pfRevenue = await revenueAccrued(client, plan.month);
+  return { ok, failed, after: { pfRevenue, msRevenue: plan.msRevenue, delta: round2(pfRevenue - plan.msRevenue) } };
+}
+
+/** Компактный бэкап исходных операций (только id-шники и даты; для ручного отката). */
+export function backupOf(raw: Rec[], minimal = false): Rec[] {
+  return raw.map((o) => {
+    const x = opParts(o)[0] ?? {};
+    if (minimal) return { operationId: opId(o), calculationDate: day(x.calculationDate), isCalculationCommitted: x.isCalculationCommitted };
+    return {
+      operationId: opId(o),
+      operationDate: day(o.operationDate),
+      value: o.value,
+      isCommitted: o.isCommitted,
+      accountId: o.account?.accountId,
+      contrAgentId: x.contrAgent?.contrAgentId,
+      projectId: x.project?.projectId,
+      operationCategoryId: x.operationCategory?.operationCategoryId,
+      parts: [{ value: x.value, calculationDate: day(x.calculationDate), isCalculationCommitted: x.isCalculationCommitted }],
+    };
+  });
+}

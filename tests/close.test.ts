@@ -247,3 +247,165 @@ describe("пагинация", () => {
     expect(r.isError).toBe(true);
   });
 });
+
+// ---------- Task 5: перенос выручки (4.1) ----------
+import { applyDefer, deferPlan } from "../src/services/close.js";
+
+const REV = 2945160;
+const revPart = (id: number, v: number, over: Record<string, unknown> = {}) =>
+  part(id, { value: v, calculationDate: "2026-10-20", operationCategory: { operationCategoryId: REV, title: "Производство и продажа" }, contrAgent: { contrAgentId: 55, title: "Клиент" }, project: { projectId: 7 }, ...over });
+const rop = (id: number, date: string, v: number, over: Record<string, unknown> = {}, parts?: any[]) =>
+  op(id, { operationDate: date, value: v, comment: `c${id}`, account: { accountId: 900 + id, title: "Р/с <b>" }, contrAgent: { contrAgentId: 55, title: "Клиент" }, ...over }, parts ?? [revPart(id, v)]);
+
+// pfRev по history = 1000.25 + 500 + 250 = 1750.25
+const PF = 1750.25;
+
+function setupDefer(ops: any[], opts: { failIds?: number[]; afterHist?: unknown } = {}) {
+  const puts: { id: string; body: any }[] = [];
+  let histCalls = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: any, init?: any) => {
+      const url = new URL(String(input));
+      const path = url.pathname.replace("/api/v1", "");
+      const json = (data: unknown) => new Response(JSON.stringify({ isSuccess: true, data }), { status: 200 });
+      if (init?.method === "PUT") {
+        const id = path.split("/").pop()!;
+        puts.push({ id, body: JSON.parse(init.body) });
+        if (opts.failIds?.includes(Number(id))) return new Response(JSON.stringify({ isSuccess: false, errorMessage: "boom <x>" }), { status: 200 });
+        return json({});
+      }
+      if (path === "/bizinfos/incomeoutcomehistorybyoperationcategories") {
+        histCalls++;
+        return new Response(JSON.stringify(histCalls > 1 && opts.afterHist ? opts.afterHist : history), { status: 200 });
+      }
+      if (path === "/operations") {
+        const offset = Number(url.searchParams.get("paging.offset") ?? 0);
+        const limit = Number(url.searchParams.get("paging.limit") ?? 1000);
+        return json({ items: ops.slice(offset, offset + limit) });
+      }
+      return new Response("{}", { status: 404 });
+    }),
+  );
+  const client = new PlanFactClient("k", "https://pf.test");
+  const handlers: Record<string, (p: any) => Promise<any>> = {};
+  registerCloseTools({ registerTool: (n: string, _c: unknown, h: any) => (handlers[n] = h) } as any, client);
+  return { client, handlers, puts };
+}
+
+describe("deferPlan / applyDefer / planfact_defer_revenue", () => {
+  it("target <= 0: no defer, empty pick, no PUT even when confirmed", async () => {
+    const { client, handlers, puts } = setupDefer([rop(1, "2026-10-31", 500)]);
+    const plan = await deferPlan(client, "2026-10", PF + 10);
+    expect(plan.needDefer).toBe(false);
+    expect(plan.pick).toEqual([]);
+    expect(plan.target).toBeLessThanOrEqual(0);
+    const r = await handlers.planfact_defer_revenue({ month: "2026-10", msRevenue: PF + 10, confirmed: true, response_format: "markdown" });
+    expect(puts).toHaveLength(0);
+    expect(r.structuredContent.needDefer).toBe(false);
+    expect(r.content[0].text).toContain("перенос не нужен");
+  });
+
+  it("picks from month end and the final добивка takes the minimal covering candidate", async () => {
+    const ops = [rop(1, "2026-10-31", 900), rop(2, "2026-10-30", 400), rop(3, "2026-10-29", 350)];
+    const { client } = setupDefer(ops);
+    const plan = await deferPlan(client, "2026-10", PF - 340);
+    expect(plan.target).toBe(340);
+    expect(plan.nextMonthEnd).toBe("2026-11-30");
+    expect(plan.pick.map((p) => p.operationId)).toEqual([3]);
+    expect(plan.overshoot).toBe(10);
+    expect(plan.shortfall).toBe(0);
+    expect(plan.candidates).toBe(3);
+
+    const plan2 = await deferPlan(client, "2026-10", PF - 1000);
+    // 900 (<1000), then 400 covers -> popped, need 100 -> min >=100 among unused = 350
+    expect(plan2.pick.map((p) => p.operationId)).toEqual([1, 3]);
+    expect(plan2.picked).toBe(2);
+    expect(plan2.overshoot).toBe(250);
+  });
+
+  it("reports shortfall when candidates cannot cover the target", async () => {
+    const { client } = setupDefer([rop(1, "2026-10-31", 100)]);
+    const plan = await deferPlan(client, "2026-10", PF - 500);
+    expect(plan.pick.map((p) => p.operationId)).toEqual([1]);
+    expect(plan.shortfall).toBe(400);
+    expect(plan.overshoot).toBe(0);
+  });
+
+  it("skips multi-part operations and counts them; ignores non-month / uncommitted / foreign-category parts", async () => {
+    const multi = rop(10, "2026-10-31", 700, {}, [revPart(10, 400), revPart(11, 300)]);
+    const outOfMonth = rop(11, "2026-10-31", 700, {}, [revPart(11, 700, { calculationDate: "2026-09-30" })]);
+    const tail = rop(12, "2026-10-31", 700, {}, [revPart(12, 700, { isCalculationCommitted: false })]);
+    const foreign = rop(13, "2026-10-31", 700, {}, [revPart(13, 700, { operationCategory: { operationCategoryId: 5, title: "X" } })]);
+    const good = rop(1, "2026-10-20", 300);
+    const { client } = setupDefer([multi, outOfMonth, tail, foreign, good]);
+    const plan = await deferPlan(client, "2026-10", PF - 200);
+    expect(plan.multiSkipped).toEqual({ count: 1, sum: 700 });
+    expect(plan.candidates).toBe(1);
+    expect(plan.pick.map((p) => p.operationId)).toEqual([1]);
+  });
+
+  it("applyDefer sends the full payload; isSuccess:false goes to failed, the rest is still written", async () => {
+    const ops = [rop(1, "2026-10-31", 300), rop(2, "2026-10-30", 300), rop(3, "2026-10-29", 300)];
+    const { client, puts } = setupDefer(ops, { failIds: [2], afterHist: { isSuccess: true, data: [{ operationCategoryId: REV, details: [detail(1, 1000)] }] } });
+    const plan = await deferPlan(client, "2026-10", PF - 900);
+    expect(plan.pick).toHaveLength(3);
+    const res = await applyDefer(client, plan);
+    expect(res.ok).toBe(2);
+    expect(res.failed).toHaveLength(1);
+    expect(res.failed[0].id).toBe(2);
+    expect(res.failed[0].err).toContain("boom");
+    expect(puts.map((p) => p.id)).toEqual(["1", "2", "3"]);
+    expect(res.after).toEqual({ pfRevenue: 1000, msRevenue: 850.25, delta: 149.75 });
+    expect(puts[0].body).toEqual({
+      operationDate: "2026-10-31",
+      calculationDate: "2026-11-30",
+      isCalculationCommitted: false,
+      accountId: 901,
+      value: 300,
+      comment: "c1",
+      isCommitted: true,
+      contrAgentId: 55,
+      operationCategoryId: REV,
+      items: [{ calculationDate: "2026-11-30", isCalculationCommitted: false, value: 300, contrAgentId: 55, operationCategoryId: REV, projectId: 7 }],
+    });
+  });
+
+  it("tool: preview (and missing confirmed) never PUTs, wraps titles, stays under 8 KB with a big plan", async () => {
+    const ops = Array.from({ length: 80 }, (_, i) =>
+      rop(i + 1, "2026-10-30", 100 + i, { comment: "x".repeat(300), account: { accountId: 1, title: "A".repeat(200) } }),
+    );
+    const { handlers, puts } = setupDefer(ops);
+    for (const confirmed of [false, undefined]) {
+      for (const fmt of ["json", "markdown"]) {
+        const r = await handlers.planfact_defer_revenue({ month: "2026-10", msRevenue: PF - 6000, confirmed, response_format: fmt });
+        expect(puts).toHaveLength(0);
+        const s = r.structuredContent;
+        expect(s.needDefer).toBe(true);
+        expect(s.pick).toHaveLength(10);
+        expect(s.picked).toBeGreaterThan(10);
+        expect(s.pick[0].account).toContain("<untrusted_data>");
+        expect(s.pick[0].category).toContain("<untrusted_data>");
+        expect(JSON.stringify(s).length).toBeLessThan(8000);
+        expect(r.content[0].text.length).toBeLessThan(8000);
+        expect(JSON.stringify(s, null, 2).length + JSON.stringify(s).length).toBeLessThanOrEqual(7600);
+        expect(s.backup.length).toBeGreaterThan(0);
+        expect(s.backupTrimmed).toBe(true);
+      }
+    }
+  });
+
+  it("tool: small plan keeps the full backup; confirmed:true writes and returns ok/failed/after", async () => {
+    const ops = [rop(1, "2026-10-31", 300)];
+    const { handlers, puts } = setupDefer(ops);
+    const prev = await handlers.planfact_defer_revenue({ month: "2026-10", msRevenue: PF - 200, confirmed: false, response_format: "json" });
+    expect(prev.structuredContent.backupTrimmed).toBeFalsy();
+    expect(prev.structuredContent.backup[0].parts[0].calculationDate).toBe("2026-10-20");
+    expect(puts).toHaveLength(0);
+    const r = await handlers.planfact_defer_revenue({ month: "2026-10", msRevenue: PF - 200, confirmed: true, response_format: "json" });
+    expect(puts).toHaveLength(1);
+    expect(r.structuredContent.ok).toBe(1);
+    expect(r.structuredContent.failed).toEqual([]);
+    expect(r.structuredContent.after).toBeDefined();
+  });
+});

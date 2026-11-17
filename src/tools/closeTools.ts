@@ -1,9 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { markdownTable, toolError, toolSuccess } from "../formatters.js";
+import { markdownTable, toolError, toolSuccess, untrusted } from "../formatters.js";
 import { responseFormatSchema } from "../schemas/common.js";
 import type { PlanFactClient } from "../services/planfactClient.js";
-import { cdekUnaccrued, fitBudget, preflight, receivables, revenueCheck } from "../services/close.js";
+import { applyDefer, backupOf, cdekUnaccrued, deferPlan, fitBudget, preflight, receivables, revenueCheck, RESPONSE_BUDGET } from "../services/close.js";
 
 const monthSchema = z
   .string()
@@ -99,6 +99,59 @@ export function registerCloseTools(server: McpServer, client: PlanFactClient): v
           `ЗП: производство ${pr.production}, коммерция ${pr.commercial}, админ ${pr.admin}, директор ${pr.director}, налог по ЗП ${pr.payrollTax}`,
         ].join("\n");
         return toolSuccess(r, text, p.response_format);
+      } catch (e) {
+        return toolError(e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "planfact_defer_revenue",
+    {
+      title: "Defer revenue accrual to next month",
+      description:
+        "Перенос начисления выручки на конец следующего месяца (4.1). target = выручка ПФ − выручка МС; отбираются одночастные операции с конца месяца + добивка минимальной. Без confirmed:true (или confirmed:false) — только предпросмотр плана с бэкапом, ничего не пишет. С confirmed:true — PUT по каждой операции (calculationDate = конец следующего месяца, isCalculationCommitted=false) и перепроверка выручки. Запись только после явного подтверждения пользователя. Названия обёрнуты в <untrusted_data>.",
+      inputSchema: z
+        .object({
+          month: monthSchema,
+          msRevenue: z.number().describe("Выручка МС за месяц, руб."),
+          confirmed: z.boolean().describe("true — записать перенос (только после явного подтверждения пользователя); false — только предпросмотр."),
+          response_format: responseFormatSchema,
+        })
+        .strict(),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async (p) => {
+      try {
+        const plan = await deferPlan(client, p.month, p.msRevenue);
+        const { raw, pick, ...rest } = plan;
+        const out: Record<string, any> = { ...rest, pick: pick.slice(0, 10), confirmed: p.confirmed === true };
+        const head = `ПФ доход ${plan.pfRevenue} − МС отгрузки ${plan.msRevenue} = ${plan.target} ₽`;
+        if (!plan.needDefer) {
+          out.ok = 0;
+          out.failed = [];
+          return toolSuccess(out, `${head}. Записывать нечего: перенос не нужен.`, p.response_format);
+        }
+        const summary = `${head}. Отобрано ${plan.picked} операций на ${plan.pickedSum} ₽ (перебор ${plan.overshoot}${plan.shortfall > 0 ? `, не хватает ${plan.shortfall}` : ""}). Многочастных пропущено: ${plan.multiSkipped.count} на ${plan.multiSkipped.sum} ₽.`;
+        if (p.confirmed !== true) {
+          out.backup = backupOf(raw);
+          if (JSON.stringify(out, null, 2).length + JSON.stringify(out).length > RESPONSE_BUDGET) {
+            out.backup = backupOf(raw, true);
+            out.backupTrimmed = true;
+          }
+          fitBudget(out, ["backup"]);
+          console.error(JSON.stringify({ tool: "planfact_defer_revenue", stage: "preview", month: p.month, backup: backupOf(raw) }));
+          return toolSuccess(out, `${summary}\nПредпросмотр: ничего не записано. Подтвердите, чтобы перенести начисление на ${plan.nextMonthEnd}.`, p.response_format);
+        }
+        console.error(JSON.stringify({ tool: "planfact_defer_revenue", stage: "write", month: p.month, backup: backupOf(raw) }));
+        const res = await applyDefer(client, plan);
+        out.ok = res.ok;
+        out.failed = res.failed.slice(0, 20).map((f) => ({ id: f.id, err: untrusted(f.err.slice(0, 200)) }));
+        out.failedCount = res.failed.length;
+        out.after = res.after;
+        fitBudget(out, ["failed"]);
+        const text = `${summary}\nПеренесено ${res.ok} из ${plan.picked}${res.failed.length ? `, ошибок ${res.failed.length}` : ""}. Выручка после переноса: ПФ ${res.after.pfRevenue}, МС ${res.after.msRevenue}, Δ ${res.after.delta} ₽.`;
+        return toolSuccess(out, text, p.response_format);
       } catch (e) {
         return toolError(e);
       }
