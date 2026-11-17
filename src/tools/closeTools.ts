@@ -110,46 +110,71 @@ export function registerCloseTools(server: McpServer, client: PlanFactClient): v
     {
       title: "Defer revenue accrual to next month",
       description:
-        "Перенос начисления выручки на конец следующего месяца (4.1). target = выручка ПФ − выручка МС; отбираются одночастные операции с конца месяца + добивка минимальной. Без confirmed:true (или confirmed:false) — только предпросмотр плана с бэкапом, ничего не пишет. С confirmed:true — PUT по каждой операции (calculationDate = конец следующего месяца, isCalculationCommitted=false) и перепроверка выручки. Запись только после явного подтверждения пользователя. Названия обёрнуты в <untrusted_data>.",
+        "Перенос начисления выручки на конец следующего месяца (4.1). target = выручка ПФ − выручка МС; отбираются одночастные операции с конца месяца + добивка минимальной. confirmed:false — только предпросмотр плана (pickIds, бэкап [operationId, исходная calculationDate]), ничего не пишет. confirmed:true — PUT по каждой операции (calculationDate = конец следующего месяца, isCalculationCommitted=false) и перепроверка выручки; передайте expectedOperationIds = pickIds из предпросмотра: если план изменился, запись отклоняется (refused:'plan_changed'). Ответ содержит written (id записанных). Запись только после явного подтверждения пользователя. Названия обёрнуты в <untrusted_data>.",
       inputSchema: z
         .object({
           month: monthSchema,
-          msRevenue: z.number().describe("Выручка МС за месяц, руб."),
+          msRevenue: z.number().nonnegative().describe("Выручка МС за месяц, руб."),
           confirmed: z.boolean().describe("true — записать перенос (только после явного подтверждения пользователя); false — только предпросмотр."),
+          expectedOperationIds: z.array(z.number()).optional().describe("pickIds из предпросмотра; при confirmed:true план сверяется с ними."),
           response_format: responseFormatSchema,
         })
         .strict(),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
     async (p) => {
       try {
+        const confirmed = p.confirmed === true;
+        const closed = process.env.PLANFACT_CLOSED_THROUGH?.trim();
+        if (confirmed && closed && /^\d{4}-\d{2}$/.test(closed) && p.month <= closed) {
+          return toolSuccess({ refused: "month_closed", month: p.month, closedThrough: closed }, `Месяц ${p.month} закрыт (по ${closed}) — запись отклонена. Предпросмотр доступен.`, p.response_format);
+        }
         const plan = await deferPlan(client, p.month, p.msRevenue);
         const { raw, pick, ...rest } = plan;
-        const out: Record<string, any> = { ...rest, pick: pick.slice(0, 10), confirmed: p.confirmed === true };
+        const pickIds = pick.map((x) => x.operationId).filter((x): x is number => x !== undefined);
+        const out: Record<string, any> = { ...rest, pick: pick.slice(0, 10), pickIds, confirmed };
         const head = `ПФ доход ${plan.pfRevenue} − МС отгрузки ${plan.msRevenue} = ${plan.target} ₽`;
         if (!plan.needDefer) {
           out.ok = 0;
           out.failed = [];
+          out.written = [];
           return toolSuccess(out, `${head}. Записывать нечего: перенос не нужен.`, p.response_format);
         }
+        if (plan.picked === 0) {
+          out.noCandidates = true;
+          out.ok = 0;
+          out.failed = [];
+          out.written = [];
+          return toolSuccess(out, `${head}: нет подходящих одночастных операций, остаток ${plan.target} ₽ разнести вручную.`, p.response_format);
+        }
         const summary = `${head}. Отобрано ${plan.picked} операций на ${plan.pickedSum} ₽ (перебор ${plan.overshoot}${plan.shortfall > 0 ? `, не хватает ${plan.shortfall}` : ""}). Многочастных пропущено: ${plan.multiSkipped.count} на ${plan.multiSkipped.sum} ₽.`;
-        if (p.confirmed !== true) {
+        const backupLog = () => console.error(JSON.stringify({ tool: "planfact_defer_revenue", stage: confirmed ? "write" : "preview", month: p.month, backup: backupOf(raw) }));
+        if (!confirmed) {
           out.backup = backupOf(raw);
           if (JSON.stringify(out, null, 2).length + JSON.stringify(out).length > RESPONSE_BUDGET) {
             out.backup = backupOf(raw, true);
             out.backupTrimmed = true;
           }
-          fitBudget(out, ["backup"]);
-          console.error(JSON.stringify({ tool: "planfact_defer_revenue", stage: "preview", month: p.month, backup: backupOf(raw) }));
+          fitBudget(out, ["pick"]);
+          backupLog();
           return toolSuccess(out, `${summary}\nПредпросмотр: ничего не записано. Подтвердите, чтобы перенести начисление на ${plan.nextMonthEnd}.`, p.response_format);
         }
-        console.error(JSON.stringify({ tool: "planfact_defer_revenue", stage: "write", month: p.month, backup: backupOf(raw) }));
+        if (p.expectedOperationIds) {
+          const exp = new Set(p.expectedOperationIds);
+          const act = new Set(pickIds);
+          if (exp.size !== act.size || [...act].some((i) => !exp.has(i))) {
+            const refused = { refused: "plan_changed", expected: [...exp], actual: pickIds };
+            return toolSuccess(refused, `План изменился с момента предпросмотра (ожидалось ${exp.size} операций, сейчас ${act.size}) — ничего не записано. Запустите предпросмотр заново и подтвердите новый план.`, p.response_format);
+          }
+        }
+        backupLog();
         const res = await applyDefer(client, plan);
         out.ok = res.ok;
+        out.written = res.written;
         out.failed = res.failed.slice(0, 20).map((f) => ({ id: f.id, err: untrusted(f.err.slice(0, 200)) }));
         out.failedCount = res.failed.length;
         out.after = res.after;
-        fitBudget(out, ["failed"]);
+        fitBudget(out, ["pick", "failed"]);
         const text = `${summary}\nПеренесено ${res.ok} из ${plan.picked}${res.failed.length ? `, ошибок ${res.failed.length}` : ""}. Выручка после переноса: ПФ ${res.after.pfRevenue}, МС ${res.after.msRevenue}, Δ ${res.after.delta} ₽.`;
         return toolSuccess(out, text, p.response_format);
       } catch (e) {

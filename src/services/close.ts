@@ -332,14 +332,19 @@ function nextMonth(ym: string): string {
   return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`;
 }
 
-export type DeferResult = { ok: number; failed: Array<{ id: number | undefined; err: string }>; after: { pfRevenue: number; msRevenue: number; delta: number } };
+export type DeferResult = { ok: number; written: number[]; failed: Array<{ id: number | undefined; err: string }>; after: { pfRevenue: number; msRevenue: number; delta: number } };
 
 /** Запись переноса: PUT полным payload по каждой выбранной операции; сбой одной не останавливает остальные. */
 export async function applyDefer(client: PlanFactClient, plan: DeferPlan): Promise<DeferResult> {
   let ok = 0;
+  const written: number[] = [];
   const failed: DeferResult["failed"] = [];
   for (const o of plan.raw) {
     const id = opId(o);
+    if (id === undefined) {
+      failed.push({ id, err: "operation without operationId, skipped" });
+      continue;
+    }
     try {
       const x = opParts(o)[0];
       const contrAgentId = x.contrAgent?.contrAgentId;
@@ -362,19 +367,20 @@ export async function applyDefer(client: PlanFactClient, plan: DeferPlan): Promi
         },
       });
       ok++;
+      written.push(id);
     } catch (e) {
       failed.push({ id, err: e instanceof Error ? e.message : String(e) });
     }
   }
   const pfRevenue = await revenueAccrued(client, plan.month);
-  return { ok, failed, after: { pfRevenue, msRevenue: plan.msRevenue, delta: round2(pfRevenue - plan.msRevenue) } };
+  return { ok, written, failed, after: { pfRevenue, msRevenue: plan.msRevenue, delta: round2(pfRevenue - plan.msRevenue) } };
 }
 
 /** Компактный бэкап исходных операций (только id-шники и даты; для ручного отката). */
 export function backupOf(raw: Rec[], minimal = false): Rec[] {
   return raw.map((o) => {
     const x = opParts(o)[0] ?? {};
-    if (minimal) return { operationId: opId(o), calculationDate: day(x.calculationDate), isCalculationCommitted: x.isCalculationCommitted };
+    if (minimal) return [opId(o), day(x.calculationDate)] as unknown as Rec;
     return {
       operationId: opId(o),
       operationDate: day(o.operationDate),

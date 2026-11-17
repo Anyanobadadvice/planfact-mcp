@@ -382,15 +382,18 @@ describe("deferPlan / applyDefer / planfact_defer_revenue", () => {
         expect(puts).toHaveLength(0);
         const s = r.structuredContent;
         expect(s.needDefer).toBe(true);
-        expect(s.pick).toHaveLength(10);
+        expect(s.pick.length).toBeGreaterThan(0);
+        expect(s.pick.length).toBeLessThanOrEqual(10);
         expect(s.picked).toBeGreaterThan(10);
         expect(s.pick[0].account).toContain("<untrusted_data>");
         expect(s.pick[0].category).toContain("<untrusted_data>");
         expect(JSON.stringify(s).length).toBeLessThan(8000);
         expect(r.content[0].text.length).toBeLessThan(8000);
         expect(JSON.stringify(s, null, 2).length + JSON.stringify(s).length).toBeLessThanOrEqual(7600);
-        expect(s.backup.length).toBeGreaterThan(0);
         expect(s.backupTrimmed).toBe(true);
+        expect(s.backup).toHaveLength(s.picked);
+        expect(s.pickIds).toHaveLength(s.picked);
+        for (const id of s.pickIds) expect(s.backup.some((b: any[]) => b[0] === id && b[1] === "2026-10-20")).toBe(true);
       }
     }
   });
@@ -407,5 +410,55 @@ describe("deferPlan / applyDefer / planfact_defer_revenue", () => {
     expect(r.structuredContent.ok).toBe(1);
     expect(r.structuredContent.failed).toEqual([]);
     expect(r.structuredContent.after).toBeDefined();
+  });
+});
+
+describe("planfact_defer_revenue: fix round 1", () => {
+  const ops = () => [rop(1, "2026-10-31", 300), rop(2, "2026-10-30", 300)];
+  const call = (h: any, extra: Record<string, unknown>) =>
+    h.planfact_defer_revenue({ month: "2026-10", msRevenue: PF - 500, response_format: "json", ...extra });
+
+  it("plan_changed: expectedOperationIds mismatch -> no PUT", async () => {
+    const { handlers, puts } = setupDefer(ops());
+    const r = await call(handlers, { confirmed: true, expectedOperationIds: [1, 99] });
+    expect(puts).toHaveLength(0);
+    expect(r.structuredContent.refused).toBe("plan_changed");
+    expect(r.structuredContent.actual).toEqual([1, 2]);
+  });
+
+  it("match (as sets) -> PUT and written lists the ids", async () => {
+    const { handlers, puts } = setupDefer(ops(), { failIds: [2] });
+    const prev = await call(handlers, { confirmed: false });
+    expect(prev.structuredContent.pickIds).toEqual([1, 2]);
+    const r = await call(handlers, { confirmed: true, expectedOperationIds: [2, 1] });
+    expect(puts).toHaveLength(2);
+    expect(r.structuredContent.written).toEqual([1]);
+    expect(r.structuredContent.failed[0].id).toBe(2);
+  });
+
+  it("closed month refuses confirmed but allows preview", async () => {
+    process.env.PLANFACT_CLOSED_THROUGH = "2026-10";
+    const { handlers, puts } = setupDefer(ops());
+    const r = await call(handlers, { confirmed: true });
+    expect(puts).toHaveLength(0);
+    expect(r.structuredContent.refused).toBe("month_closed");
+    const pv = await call(handlers, { confirmed: false });
+    expect(pv.structuredContent.needDefer).toBe(true);
+  });
+
+  it("no candidates: plain message and noCandidates flag", async () => {
+    const { handlers, puts } = setupDefer([]);
+    const r = await handlers.planfact_defer_revenue({ month: "2026-10", msRevenue: PF - 500, confirmed: true, response_format: "markdown" });
+    expect(puts).toHaveLength(0);
+    expect(r.structuredContent.noCandidates).toBe(true);
+    expect(r.content[0].text).toContain("нет подходящих одночастных операций, остаток 500");
+  });
+
+  it("operation without operationId is skipped into failed, not PUT", async () => {
+    const { client, puts } = setupDefer([]);
+    const plan: any = { month: "2026-10", msRevenue: 0, nextMonthEnd: "2026-11-30", raw: [{ operationParts: [{}] }] };
+    const res = await applyDefer(client, plan);
+    expect(puts).toHaveLength(0);
+    expect(res.failed).toHaveLength(1);
   });
 });
