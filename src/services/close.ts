@@ -213,6 +213,13 @@ export function prevMonthClosed(ym: string, closedThrough = process.env.PLANFACT
   return v >= monthBounds(ym).prev;
 }
 
+/** Отказ записи в закрытый месяц (`month <= PLANFACT_CLOSED_THROUGH`); null, если запись разрешена. */
+export function closedMonthRefusal(month: string): { refused: "month_closed"; month: string; closedThrough: string } | null {
+  const closed = process.env.PLANFACT_CLOSED_THROUGH?.trim();
+  if (closed && /^\d{4}-\d{2}$/.test(closed) && month <= closed) return { refused: "month_closed", month, closedThrough: closed };
+  return null;
+}
+
 export async function preflight(client: PlanFactClient, ym: string): Promise<PreflightResult> {
   const [sums, titles, unallocIds, ops] = await Promise.all([
     bizinfosByCategory(client, ym),

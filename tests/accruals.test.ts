@@ -17,7 +17,7 @@ const turnover = (gpStart = 1000, gpEnd = 1500) => ({
 });
 const inc = (id: number, accountId: number, value: number) => ({ operationId: id, operationType: "Income", value, account: { accountId }, operationParts: [] });
 
-function setup(opts: { hist?: any[]; ops?: any[]; failOn?: (path: string, body: any) => boolean } = {}) {
+function setup(opts: { hist?: any[]; ops?: any[]; failOn?: (path: string, body: any) => boolean; failBizAfterPost?: boolean } = {}) {
   const posts: { path: string; body: any }[] = [];
   const gets: { path: string; query: URLSearchParams }[] = [];
   vi.stubGlobal(
@@ -32,6 +32,7 @@ function setup(opts: { hist?: any[]; ops?: any[]; failOn?: (path: string, body: 
         if (opts.failOn?.(path, body)) return new Response(JSON.stringify({ isSuccess: false, errorMessage: "boom" }), { status: 200 });
         return new Response(JSON.stringify({ isSuccess: true, data: { operationId: 1 } }), { status: 200 });
       }
+      if (opts.failBizAfterPost && posts.length > 0 && path.startsWith("/bizinfos")) return new Response(JSON.stringify({ isSuccess: false, errorMessage: "biz down" }), { status: 200 });
       gets.push({ path, query: url.searchParams });
       const json = (data: unknown) => new Response(JSON.stringify({ isSuccess: true, data }), { status: 200 });
       if (path === "/bizinfos/incomeoutcomehistorybyoperationcategories") return json(opts.hist ?? []);
@@ -134,7 +135,7 @@ describe("planfact_month_accruals", () => {
     expect(s.date).toBe("2026-10-31");
     expect(s.payDate).toBe("2026-11-30");
     expect(s.taxBase).toBe(10000);
-    expect(s.warning).toContain("уточните у Марии");
+    expect(s.warning).toContain("skip: ['4.9']");
     expect(s.jobs).toHaveLength(5);
     expect(JSON.stringify(s, null, 2).length + JSON.stringify(s).length).toBeLessThan(8000);
   });
@@ -182,6 +183,39 @@ describe("planfact_month_accruals", () => {
     expect(posts).toHaveLength(0);
     expect(r.structuredContent.refused).toBe("month_closed");
     expect((await call(handlers)).structuredContent.jobs).toHaveLength(5);
+  });
+
+  it("перепроверка упала после записи: results сохранены, afterError, не isError", async () => {
+    const { handlers, posts } = setup({ ops, failBizAfterPost: true });
+    const r = await call(handlers, { confirmed: true });
+    expect(posts.length).toBeGreaterThan(0);
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent.results.length).toBe(posts.length);
+    expect(r.structuredContent.afterError).toBeTruthy();
+    expect(r.structuredContent.after).toBeUndefined();
+    const s2 = setup({ ops, failBizAfterPost: true });
+    const md = await call(s2.handlers, { confirmed: true, response_format: "markdown" });
+    expect(md.content[0].text).toContain("перепроверка не удалась");
+  });
+
+  it("expectedValues: расхождение — отказ без POST; совпадение — запись", async () => {
+    const { handlers, posts } = setup({ ops });
+    const pv = (await call(handlers)).structuredContent;
+    expect(pv.values["4.8"]).toBe(500);
+    const bad = await call(handlers, { confirmed: true, expectedValues: { ...pv.values, "4.5": 1 } });
+    expect(posts).toHaveLength(0);
+    expect(bad.structuredContent.refused).toBe("plan_changed");
+    const good = await call(handlers, { confirmed: true, expectedValues: pv.values });
+    expect(posts).toHaveLength(5);
+    expect(good.structuredContent.refused).toBeUndefined();
+  });
+
+  it("налог: дробная база, комментарий с округлённой базой, credit null", async () => {
+    const { handlers, posts } = setup({ ops: [inc(1, 948011, 1000.6), inc(2, 948030, 0.3)] });
+    const r = await call(handlers, { confirmed: true, skip: ["4.5", "4.6", "4.7", "4.8"] });
+    expect(posts[0].body.comment).toBe("Налог на прибыль 1.7% от поступлений 2026-10 (база 1001)");
+    expect(posts[0].body.value).toBe(17.02);
+    expect(r.structuredContent.jobs[0].credit).toBeNull();
   });
 
   it("applyAccruals: isSuccess:false -> ok:false, err", async () => {

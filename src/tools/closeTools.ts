@@ -4,7 +4,7 @@ import { markdownTable, toolError, toolSuccess, untrusted } from "../formatters.
 import { responseFormatSchema } from "../schemas/common.js";
 import type { PlanFactClient } from "../services/planfactClient.js";
 import { accrualPlan, applyAccruals, ENP_WARNING, turnoverSchema } from "../services/accruals.js";
-import { applyDefer, backupOf, cdekUnaccrued, deferPlan, fitBudget, preflight, receivables, revenueCheck, RESPONSE_BUDGET } from "../services/close.js";
+import { applyDefer, closedMonthRefusal, backupOf, cdekUnaccrued, deferPlan, fitBudget, preflight, receivables, revenueCheck, RESPONSE_BUDGET } from "../services/close.js";
 
 const monthSchema = z
   .string()
@@ -126,9 +126,9 @@ export function registerCloseTools(server: McpServer, client: PlanFactClient): v
     async (p) => {
       try {
         const confirmed = p.confirmed === true;
-        const closed = process.env.PLANFACT_CLOSED_THROUGH?.trim();
-        if (confirmed && closed && /^\d{4}-\d{2}$/.test(closed) && p.month <= closed) {
-          return toolSuccess({ refused: "month_closed", month: p.month, closedThrough: closed }, `Месяц ${p.month} закрыт (по ${closed}) — запись отклонена. Предпросмотр доступен.`, p.response_format);
+        const closedRef = confirmed ? closedMonthRefusal(p.month) : null;
+        if (closedRef) {
+          return toolSuccess(closedRef, `Месяц ${p.month} закрыт (по ${closedRef.closedThrough}) — запись отклонена. Предпросмотр доступен.`, p.response_format);
         }
         const plan = await deferPlan(client, p.month, p.msRevenue);
         const { raw, pick, ...rest } = plan;
@@ -193,6 +193,7 @@ export function registerCloseTools(server: McpServer, client: PlanFactClient): v
         .object({
           month: monthSchema,
           turnover: turnoverSchema,
+          expectedValues: z.record(z.string(), z.number()).optional().describe("values из предпросмотра (код → сумма); при confirmed:true суммы сверяются, при расхождении запись отклоняется."),
           skip: z.array(z.enum(["4.5", "4.6", "4.7", "4.8", "4.9"])).optional().describe("Коды начислений, которые не делать."),
           confirmed: z.boolean().describe("true — записать (только после явного подтверждения пользователя); false — только предпросмотр."),
           response_format: responseFormatSchema,
@@ -203,22 +204,30 @@ export function registerCloseTools(server: McpServer, client: PlanFactClient): v
     async (p) => {
       try {
         const confirmed = p.confirmed === true;
-        const closed = process.env.PLANFACT_CLOSED_THROUGH?.trim();
-        if (confirmed && closed && /^\d{4}-\d{2}$/.test(closed) && p.month <= closed) {
-          return toolSuccess({ refused: "month_closed", month: p.month, closedThrough: closed }, `Месяц ${p.month} закрыт (по ${closed}) — запись отклонена. Предпросмотр доступен.`, p.response_format);
+        const closedRef = confirmed ? closedMonthRefusal(p.month) : null;
+        if (closedRef) {
+          return toolSuccess(closedRef, `Месяц ${p.month} закрыт (по ${closedRef.closedThrough}) — запись отклонена. Предпросмотр доступен.`, p.response_format);
         }
         const plan = await accrualPlan(client, p.month, p.turnover, p.skip ?? []);
-        const out: Record<string, any> = { month: plan.month, date: plan.date, payDate: plan.payDate, jobs: plan.jobs, taxBase: plan.taxBase, warning: ENP_WARNING, confirmed };
+        const out: Record<string, any> = { month: plan.month, date: plan.date, payDate: plan.payDate, jobs: plan.jobs, taxBase: plan.taxBase, values: Object.fromEntries(plan.jobs.map((j) => [j.code, j.value])), warning: ENP_WARNING, confirmed };
         const lines = plan.jobs.map((j) => `${j.code} ${j.title}: ${j.value} ₽${j.duplicate ? " — ДУБЛЬ, пропуск" : ""}${j.note ? ` (${j.note})` : ""}`);
         const head = `Начисления ${plan.month} (дата ${plan.date}, оплата налога ${plan.payDate}), база налога ${plan.taxBase} ₽:\n${lines.join("\n")}`;
         if (!confirmed) {
           return toolSuccess(out, `${head}\n⚠️ ${ENP_WARNING}.\nПредпросмотр: ничего не записано.`, p.response_format);
         }
+        if (p.expectedValues) {
+          const actual = Object.fromEntries(plan.jobs.filter((j) => !j.duplicate && j.value >= 0.01).map((j) => [j.code, j.value]));
+          const bad = plan.jobs.some((j) => !j.duplicate && j.value >= 0.01 && !(Math.abs((p.expectedValues![j.code] ?? NaN) - j.value) <= 0.01));
+          if (bad) {
+            return toolSuccess({ refused: "plan_changed", expected: p.expectedValues, actual }, "Суммы изменились с момента предпросмотра — ничего не записано. Запустите предпросмотр заново и подтвердите новый план.", p.response_format);
+          }
+        }
         const res = await applyAccruals(client, plan);
         out.results = res.results.map((r) => (r.err ? { ...r, err: untrusted(r.err) } : r));
-        out.after = res.after;
+        if (res.after) out.after = res.after;
+        if (res.afterError) out.afterError = untrusted(res.afterError);
         const failed = res.results.filter((r) => !r.ok).length;
-        return toolSuccess(out, `${head}\nЗаписано ${res.results.length - failed} из ${res.results.length}${failed ? `, ошибок ${failed}` : ""}. После: ${JSON.stringify(res.after)}`, p.response_format);
+        return toolSuccess(out, `${head}\nЗаписано ${res.results.length - failed} из ${res.results.length}${failed ? `, ошибок ${failed}` : ""}. ${res.after ? `После: ${JSON.stringify(res.after)}` : "Записано, перепроверка не удалась."}`, p.response_format);
       } catch (e) {
         return toolError(e);
       }
