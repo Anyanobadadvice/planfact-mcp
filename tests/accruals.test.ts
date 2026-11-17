@@ -236,4 +236,73 @@ describe("planfact_month_accruals", () => {
     expect(posts.length).toBeGreaterThan(0);
     expect(res.results.every((x) => x.ok === false && x.err)).toBe(true);
   });
+
+  it("частичный сбой: isError, results сохранены, текст говорит что записано и что нет", async () => {
+    const { handlers } = setup({ ops, failOn: (_p, b) => b.outcomeOperationCategoryId === 2950844 });
+    for (const fmt of ["json", "markdown"]) {
+      const r = await call(handlers, { confirmed: true, response_format: fmt });
+      expect(r.isError).toBe(true);
+      expect(r.structuredContent.results.find((x: any) => x.code === "4.7").ok).toBe(false);
+      expect(r.structuredContent.after).toBeDefined();
+      expect(r.content[0].text.startsWith("Частичный сбой")).toBe(true);
+      expect(r.content[0].text).toContain("НЕ записано: 4.7");
+      expect(r.content[0].text).toContain("записано 4 из 5");
+    }
+    const ok = setup({ ops });
+    expect((await call(ok.handlers, { confirmed: true })).isError).toBeFalsy();
+  });
+
+  it("отказы — isError: закрытый месяц и plan_changed", async () => {
+    process.env.PLANFACT_CLOSED_THROUGH = "2026-10";
+    const a = setup({ ops });
+    const closed = await call(a.handlers, { confirmed: true });
+    expect(closed.isError).toBe(true);
+    expect(closed.content[0].text).toContain("ничего не записано");
+    expect((await call(a.handlers)).isError).toBeFalsy();
+    delete process.env.PLANFACT_CLOSED_THROUGH;
+    const b = setup({ ops });
+    const pv = (await call(b.handlers)).structuredContent;
+    const bad = await call(b.handlers, { confirmed: true, expectedValues: { ...pv.values, "4.5": 1 } });
+    expect(bad.isError).toBe(true);
+    expect(bad.structuredContent.refused).toBe("plan_changed");
+    expect(b.posts).toHaveLength(0);
+  });
+
+  it("4.8 со знаком: списание с/с — минус в values, сверка со знаком", async () => {
+    const callDown = (h: any, extra: Record<string, unknown> = {}) =>
+      h.planfact_month_accruals({ month: "2026-10", turnover: turnover(1500, 1000), confirmed: false, response_format: "json", skip: ["4.5", "4.6", "4.7", "4.9"], ...extra });
+    const { handlers, posts } = setup({ ops });
+    const pv = (await callDown(handlers)).structuredContent;
+    expect(pv.values["4.8"]).toBe(-500);
+    expect(pv.jobs[0]).toMatchObject({ code: "4.8", debit: 9829025, credit: 2947599, value: 500 });
+    // модель передала модуль без знака (направление «капитализация») — отказ без POST
+    const flipped = await callDown(handlers, { confirmed: true, expectedValues: { "4.8": 500 } });
+    expect(flipped.isError).toBe(true);
+    expect(flipped.structuredContent.refused).toBe("plan_changed");
+    expect(posts).toHaveLength(0);
+    const good = await callDown(handlers, { confirmed: true, expectedValues: { "4.8": -500 } });
+    expect(good.isError).toBeFalsy();
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body).toEqual(ACC(9829025, 2947599, 500));
+    // капитализация: плюс; минус в expectedValues — отказ
+    const up = setup({ ops });
+    const pvUp = (await call(up.handlers, { skip: ["4.5", "4.6", "4.7", "4.9"] })).structuredContent;
+    expect(pvUp.values["4.8"]).toBe(500);
+    const wrong = await call(up.handlers, { confirmed: true, skip: ["4.5", "4.6", "4.7", "4.9"], expectedValues: { "4.8": -500 } });
+    expect(wrong.structuredContent.refused).toBe("plan_changed");
+    expect(up.posts).toHaveLength(0);
+  });
+
+  it("turnover.month: совпадает — работает; не совпадает — отказ turnover_month_mismatch без POST", async () => {
+    const { handlers, posts } = setup({ ops });
+    const same = await call(handlers, { turnover: { ...turnover(), month: "2026-10" } });
+    expect(same.isError).toBeFalsy();
+    expect(same.structuredContent.jobs).toHaveLength(5);
+    for (const confirmed of [false, true]) {
+      const r = await call(handlers, { confirmed, turnover: { ...turnover(), month: "2026-09" } });
+      expect(r.isError).toBe(true);
+      expect(r.structuredContent.refused).toBe("turnover_month_mismatch");
+    }
+    expect(posts).toHaveLength(0);
+  });
 });

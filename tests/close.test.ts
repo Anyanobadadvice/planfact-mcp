@@ -473,4 +473,54 @@ describe("planfact_defer_revenue: fix round 1", () => {
     expect(puts).toHaveLength(0);
     expect(res.failed).toHaveLength(1);
   });
+
+  it("отказы — isError с данными: закрытый месяц, plan_changed по id и по сумме", async () => {
+    process.env.PLANFACT_CLOSED_THROUGH = "2026-10";
+    const a = setupDefer(ops());
+    const closed = await call(a.handlers, { confirmed: true });
+    expect(closed.isError).toBe(true);
+    expect(closed.structuredContent.refused).toBe("month_closed");
+    expect(closed.content[0].text).toContain("ничего не записано");
+    delete process.env.PLANFACT_CLOSED_THROUGH;
+    const b = setupDefer(ops());
+    const ids = await call(b.handlers, { confirmed: true, expectedOperationIds: [1, 99] });
+    expect(ids.isError).toBe(true);
+    const sum = await call(b.handlers, { confirmed: true, expectedOperationIds: [1, 2], expectedSum: 1 });
+    expect(sum.isError).toBe(true);
+    expect(sum.structuredContent.refused).toBe("plan_changed");
+    expect(b.puts).toHaveLength(0);
+  });
+
+  it("частичный сбой: isError, written/failed/after сохранены, текст называет записанные и незаписанные id", async () => {
+    for (const fmt of ["json", "markdown"]) {
+      const { handlers } = setupDefer(ops(), { failIds: [2] });
+      const r = await call(handlers, { confirmed: true, response_format: fmt });
+      expect(r.isError).toBe(true);
+      expect(r.structuredContent.written).toEqual([1]);
+      expect(r.structuredContent.failed[0].id).toBe(2);
+      expect(r.structuredContent.after).toBeDefined();
+      expect(r.content[0].text.startsWith("Частичный сбой")).toBe(true);
+      expect(r.content[0].text).toContain("записаны id: 1");
+      expect(r.content[0].text).toContain("НЕ перенесено 1 (id: 2)");
+    }
+    const ok = setupDefer(ops());
+    expect((await call(ok.handlers, { confirmed: true })).isError).toBeFalsy();
+  });
+
+  it("перепроверка выручки упала после записи: afterError, written сохранены, не исключение", async () => {
+    const down = { isSuccess: false, errorMessage: "biz down" };
+    const s1 = setupDefer(ops(), { afterHist: down });
+    const plan = await deferPlan(s1.client, "2026-10", PF - 500);
+    const res = await applyDefer(s1.client, plan);
+    expect(res.written).toEqual([1, 2]);
+    expect(res.after).toBeUndefined();
+    expect(res.afterError).toContain("biz down");
+    const s2 = setupDefer(ops(), { afterHist: down });
+    const r = await call(s2.handlers, { confirmed: true, response_format: "markdown" });
+    expect(s2.puts).toHaveLength(2);
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent.written).toEqual([1, 2]);
+    expect(r.structuredContent.afterError).toContain("biz down");
+    expect(r.content[0].text).toContain("перепроверка выручки не удалась");
+  });
 });

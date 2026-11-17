@@ -339,7 +339,14 @@ function nextMonth(ym: string): string {
   return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`;
 }
 
-export type DeferResult = { ok: number; written: number[]; failed: Array<{ id: number | undefined; err: string }>; after: { pfRevenue: number; msRevenue: number; delta: number } };
+export type DeferResult = {
+  ok: number;
+  written: number[];
+  failed: Array<{ id: number | undefined; err: string }>;
+  after?: { pfRevenue: number; msRevenue: number; delta: number };
+  /** Перепроверка выручки после записи не удалась: записи сделаны, written/failed сохранены. */
+  afterError?: string;
+};
 
 /** Запись переноса: PUT полным payload по каждой выбранной операции; сбой одной не останавливает остальные. */
 export async function applyDefer(client: PlanFactClient, plan: DeferPlan): Promise<DeferResult> {
@@ -379,8 +386,12 @@ export async function applyDefer(client: PlanFactClient, plan: DeferPlan): Promi
       failed.push({ id, err: e instanceof Error ? e.message : String(e) });
     }
   }
-  const pfRevenue = await revenueAccrued(client, plan.month);
-  return { ok, written, failed, after: { pfRevenue, msRevenue: plan.msRevenue, delta: round2(pfRevenue - plan.msRevenue) } };
+  try {
+    const pfRevenue = await revenueAccrued(client, plan.month);
+    return { ok, written, failed, after: { pfRevenue, msRevenue: plan.msRevenue, delta: round2(pfRevenue - plan.msRevenue) } };
+  } catch (e) {
+    return { ok, written, failed, afterError: (e instanceof Error ? e.message : String(e)).slice(0, 200) };
+  }
 }
 
 /** Компактный бэкап исходных операций (только id-шники и даты; для ручного отката). */

@@ -16,6 +16,19 @@ export function toolSuccess<T>(
   };
 }
 
+/**
+ * Отказ или частичный сбой записи: isError:true, структура сохраняется целиком.
+ * Текст = человеческая сводка (что записано и что нет); для json — сводка + пустая строка + компактный JSON,
+ * чтобы и клиент без structuredContent, и карточка в боте видели причину и данные.
+ */
+export function toolRefusal<T>(structuredContent: T, text: string, responseFormat: ResponseFormat): ToolOutput<T> {
+  return {
+    isError: true,
+    content: [{ type: "text", text: responseFormat === "json" ? `${text}\n\n${JSON.stringify(structuredContent)}` : text }],
+    structuredContent,
+  };
+}
+
 export function toolError(error: unknown): ToolOutput<{ error: string }> {
   const message = error instanceof Error ? error.message : String(error);
   return {

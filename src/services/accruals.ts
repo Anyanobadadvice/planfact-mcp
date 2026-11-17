@@ -4,9 +4,15 @@ import { bizinfosByCategory, fetchMonthOperations, monthBounds, round2 } from ".
 
 const flow = z.object({ outcome: z.number(), start: z.number(), end: z.number() }).passthrough();
 export const turnoverSchema = z
-  .object({ materials: flow, packaging: flow, writeoff: flow, finishedGoods: flow })
+  .object({
+    month: z.string().optional().describe("Месяц оборотов (как вернул moysklad_folder_turnover); если передан, должен совпадать с month."),
+    materials: flow,
+    packaging: flow,
+    writeoff: flow,
+    finishedGoods: flow,
+  })
   .passthrough()
-  .describe("Структурированный результат moysklad_folder_turnover({folder:'all'}): materials/packaging/writeoff/finishedGoods, у каждого outcome/start/end (руб.).");
+  .describe("Структурированный результат moysklad_folder_turnover({folder:'all'}) как есть: month и materials/packaging/writeoff/finishedGoods, у каждого outcome/start/end (руб.).");
 export type Turnover = z.infer<typeof turnoverSchema>;
 
 export type AccrualJob = { code: string; title: string; debit: number; credit: number | null; value: number; duplicate: boolean; note?: string };
@@ -25,6 +31,22 @@ const nextMonth = (ym: string): string => {
   return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`;
 };
 
+/** Дебет 4.8 при списании с/с ГП (остаток ГП уменьшился). */
+export const GP_WRITEOFF_DEBIT = 9829025;
+
+/**
+ * Сумма проводки со знаком направления: для 4.8 капитализация ГП (дебет 2947599) — плюс,
+ * списание с/с ГП (дебет 9829025) — минус; остальные коды — как есть.
+ */
+export function signedValue(j: AccrualJob): number {
+  return j.code === "4.8" && j.debit === GP_WRITEOFF_DEBIT ? -j.value : j.value;
+}
+
+/** values для предпросмотра и сверки: только записываемые проводки (без дублей, нулей, пропущенных), 4.8 — со знаком. */
+export function planValues(plan: AccrualPlan): Record<string, number> {
+  return Object.fromEntries(plan.jobs.filter((j) => !j.duplicate && j.value >= 0.01).map((j) => [j.code, signedValue(j)]));
+}
+
 /** План начислений 4.5–4.9 (порт month-accruals.mjs); `skip` — коды, которые не включать. */
 export async function accrualPlan(client: PlanFactClient, ym: string, turnover: Turnover, skip: string[] = []): Promise<AccrualPlan> {
   const date = monthBounds(ym).end;
@@ -41,7 +63,7 @@ export async function accrualPlan(client: PlanFactClient, ym: string, turnover: 
     { code: "4.7", title: "Списание", debit: 2950844, credit: 2946683, value: round2(turnover.writeoff.outcome) },
     gpDelta >= 0
       ? { code: "4.8", title: "Капитализация ГП", debit: 2947599, credit: 2946683, value: round2(gpDelta) }
-      : { code: "4.8", title: "Списание с/с ГП", debit: 9829025, credit: 2947599, value: round2(-gpDelta) },
+      : { code: "4.8", title: "Списание с/с ГП", debit: GP_WRITEOFF_DEBIT, credit: 2947599, value: round2(-gpDelta) },
   ];
 
   const income = await fetchMonthOperations(client, ym, "Income");
