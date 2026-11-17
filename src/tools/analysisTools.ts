@@ -49,7 +49,7 @@ export function registerAnalysisTools(server: McpServer, client: PlanFactClient)
     {
       title: "Get Income Outcome By Categories",
       description:
-        "Доходы и расходы по статьям за период, свёрнуто по статье (без построчных деталей). isCalculation: true — по дате начисления (ОПИУ), false — по дате оплаты (ДДС). Поле opu — итоги только по статьям класса Income/Outcome, без движения активов, кредитов и дивидендов.",
+        "Доходы и расходы по статьям за период, свёрнуто по статье (без построчных деталей). isCalculation: true — по дате начисления (ОПИУ), false — по дате оплаты (ДДС). Поле opu — итоги только по статьям класса Income/Outcome, без движения активов, кредитов и дивидендов. Названия обёрнуты в <untrusted_data>.",
       inputSchema: periodAnalysisSchema,
       annotations: {
         readOnlyHint: true,
@@ -77,7 +77,7 @@ export function registerAnalysisTools(server: McpServer, client: PlanFactClient)
     "planfact_get_income_outcome_by_projects",
     {
       title: "Get Income Outcome By Projects",
-      description: "Доходы и расходы по проектам за период, свёрнуто по проекту. isCalculation: true — по начислению, false — по оплате.",
+      description: "Доходы и расходы по проектам за период, свёрнуто по проекту. isCalculation: true — по начислению, false — по оплате. Названия обёрнуты в <untrusted_data>.",
       inputSchema: periodAnalysisSchema,
       annotations: {
         readOnlyHint: true,

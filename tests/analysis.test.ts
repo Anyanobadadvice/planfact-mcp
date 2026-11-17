@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PlanFactClient } from "../src/services/planfactClient.js";
 import { registerAnalysisTools } from "../src/tools/analysisTools.js";
 import { summarizeHistory } from "../src/services/history.js";
+import { untrusted } from "../src/formatters.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -64,8 +65,8 @@ describe("summarizeHistory", () => {
   it("сворачивает детали по статье: доход по typeId 1, расход по 2, нулевые строки выкидывает", () => {
     const s = summarizeHistory(history, "operationCategoryId", new Map([[2945160, "Продажи"]]));
     expect(s.rows.map((r) => r.id)).toEqual([2945160, 2945167, 2945128]); // по убыванию оборота; пустая статья отброшена
-    expect(s.rows[0]).toMatchObject({ title: "Продажи", type: "Income", income: 1255076.53, outcome: 0, net: 1255076.53, entries: 2 });
-    expect(s.rows[1]).toMatchObject({ title: "#2945167", type: "Outcome", outcome: 480644 });
+    expect(s.rows[0]).toMatchObject({ title: untrusted("Продажи"), type: "Income", income: 1255076.53, outcome: 0, net: 1255076.53, entries: 2 });
+    expect(s.rows[1]).toMatchObject({ title: untrusted("#2945167"), type: "Outcome", outcome: 480644 });
     expect(s.totals).toEqual({ income: 1260076.53, outcome: 485644, net: 774432.53 });
     // ОПИУ — только Income/Outcome, без «Переводов в пути» (Assets)
     expect(s.opu).toEqual({ income: 1255076.53, outcome: 480644, net: 774432.53 });
@@ -86,7 +87,7 @@ describe("planfact_get_income_outcome_by_categories", () => {
     const out = res.structuredContent;
     expect(out.raw).toBeUndefined();
     expect(out.basis).toBe("accrual");
-    expect(out.rows[0]).toMatchObject({ title: "Производство и продажа кожаных изделий", income: 1255076.53 });
+    expect(out.rows[0]).toMatchObject({ title: untrusted("Производство и продажа кожаных изделий"), income: 1255076.53 });
     expect(out.opu.income).toBe(1255076.53);
     expect(JSON.stringify(out).length).toBeLessThan(3000);
     expect(calls.filter((c) => c.path === "/operationcategories")).toHaveLength(1);
@@ -101,7 +102,7 @@ describe("planfact_get_income_outcome_by_categories", () => {
       ignoreMove: true,
       response_format: "markdown",
     });
-    expect(md.content[0].text).toContain("| Производство и продажа кожаных изделий |");
+    expect(md.content[0].text).toContain(`| ${untrusted("Производство и продажа кожаных изделий")} |`);
     expect(md.content[0].text).toContain("ДДС");
   });
 });
@@ -116,7 +117,7 @@ describe("planfact_get_income_outcome_by_projects", () => {
       ignoreMove: true,
       response_format: "json",
     });
-    expect(res.structuredContent.rows[0]).toMatchObject({ id: 375927, title: "Основной", income: 100, outcome: 40, net: 60 });
+    expect(res.structuredContent.rows[0]).toMatchObject({ id: 375927, title: untrusted("Основной"), income: 100, outcome: 40, net: 60 });
     expect(res.structuredContent.raw).toBeUndefined();
   });
 });

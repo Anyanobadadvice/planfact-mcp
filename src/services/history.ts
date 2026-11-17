@@ -1,5 +1,6 @@
 import type { PlanFactClient } from "./planfactClient.js";
 import { extractItems } from "./operations.js";
+import { untrusted } from "../formatters.js";
 
 /**
  * Свёртка ответов /bizinfos/incomeoutcomehistoryby{operationcategories,projects}.
@@ -13,7 +14,7 @@ import { extractItems } from "./operations.js";
 export type HistoryRow = {
   id: number;
   title: string;
-  /** Класс статьи из ПФ; у проектов — класс первой операции. */
+  /** Класс статьи из ПФ (только известные значения, иначе null); у проектов — класс первой операции. */
   type: string | null;
   income: number;
   outcome: number;
@@ -39,6 +40,7 @@ type Rec = Record<string, unknown>;
 const isRec = (v: unknown): v is Rec => typeof v === "object" && v !== null && !Array.isArray(v);
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 const round2 = (x: number): number => Math.round(x * 100) / 100;
+const CATEGORY_TYPES = new Set(["Income", "Outcome", "Assets", "Liabilities", "Capital"]);
 
 export function summarizeHistory(data: unknown, idKey: "operationCategoryId" | "projectId", titles: Map<number, string>): HistorySummary {
   const groups = extractItems(data);
@@ -49,7 +51,7 @@ export function summarizeHistory(data: unknown, idKey: "operationCategoryId" | "
     const details = Array.isArray(g.details) ? g.details.filter(isRec) : [];
     const row: HistoryRow = {
       id,
-      title: titles.get(id) ?? `#${id}`,
+      title: untrusted(titles.get(id) ?? `#${id}`),
       type: null,
       income: 0,
       outcome: 0,
@@ -60,7 +62,7 @@ export function summarizeHistory(data: unknown, idKey: "operationCategoryId" | "
     };
     for (const d of details) {
       entries++;
-      if (row.type === null && typeof d.operationCategoryType === "string") row.type = d.operationCategoryType;
+      if (row.type === null && typeof d.operationCategoryType === "string" && CATEGORY_TYPES.has(d.operationCategoryType)) row.type = d.operationCategoryType;
       const fact = num(d.factValueInUserCurrency ?? d.factValue);
       const plan = num(d.planValueInUserCurrency ?? d.planValue);
       if (d.operationTypeId === 1) {
