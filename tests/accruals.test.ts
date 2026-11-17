@@ -210,6 +210,17 @@ describe("planfact_month_accruals", () => {
     expect(good.structuredContent.refused).toBeUndefined();
   });
 
+  it("values: только то, что будет записано (без дублей, нулей и пропущенных)", async () => {
+    const { handlers } = setup({ ops });
+    const pv = (await call(handlers)).structuredContent;
+    const writable = pv.jobs.filter((j: any) => !j.duplicate && j.value >= 0.01).map((j: any) => j.code).sort();
+    expect(Object.keys(pv.values).sort()).toEqual(writable);
+    const sk = (await call(handlers, { skip: ["4.8"] })).structuredContent;
+    expect(sk.values["4.8"]).toBeUndefined();
+    const zero = pv.jobs.filter((j: any) => j.value < 0.01);
+    for (const j of zero) expect(pv.values[j.code]).toBeUndefined();
+  });
+
   it("налог: дробная база, комментарий с округлённой базой, credit null", async () => {
     const { handlers, posts } = setup({ ops: [inc(1, 948011, 1000.6), inc(2, 948030, 0.3)] });
     const r = await call(handlers, { confirmed: true, skip: ["4.5", "4.6", "4.7", "4.8"] });

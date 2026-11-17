@@ -436,6 +436,18 @@ describe("planfact_defer_revenue: fix round 1", () => {
     expect(r.structuredContent.failed[0].id).toBe(2);
   });
 
+  it("expectedSum: расхождение > 1 ₽ -> plan_changed без PUT; совпадение -> запись", async () => {
+    const bad = setupDefer(ops());
+    const pv = (await call(bad.handlers, { confirmed: false })).structuredContent;
+    const r = await call(bad.handlers, { confirmed: true, expectedOperationIds: pv.pickIds, expectedSum: pv.pickedSum + 5 });
+    expect(bad.puts).toHaveLength(0);
+    expect(r.structuredContent.refused).toBe("plan_changed");
+    const good = setupDefer(ops());
+    const ok = await call(good.handlers, { confirmed: true, expectedOperationIds: pv.pickIds, expectedSum: pv.pickedSum + 0.5 });
+    expect(good.puts).toHaveLength(2);
+    expect(ok.structuredContent.refused).toBeUndefined();
+  });
+
   it("closed month refuses confirmed but allows preview", async () => {
     process.env.PLANFACT_CLOSED_THROUGH = "2026-10";
     const { handlers, puts } = setupDefer(ops());

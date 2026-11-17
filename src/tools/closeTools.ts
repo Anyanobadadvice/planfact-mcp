@@ -118,6 +118,7 @@ export function registerCloseTools(server: McpServer, client: PlanFactClient): v
           msRevenue: z.number().nonnegative().describe("Выручка МС за месяц, руб."),
           confirmed: z.boolean().describe("true — записать перенос (только после явного подтверждения пользователя); false — только предпросмотр."),
           expectedOperationIds: z.array(z.number()).optional().describe("pickIds из предпросмотра; при confirmed:true план сверяется с ними."),
+          expectedSum: z.number().nonnegative().optional().describe("pickedSum из предпросмотра; при confirmed:true сумма сверяется (допуск 1 ₽), при расхождении запись отклоняется."),
           response_format: responseFormatSchema,
         })
         .strict(),
@@ -168,6 +169,10 @@ export function registerCloseTools(server: McpServer, client: PlanFactClient): v
             return toolSuccess(refused, `План изменился с момента предпросмотра (ожидалось ${exp.size} операций, сейчас ${act.size}) — ничего не записано. Запустите предпросмотр заново и подтвердите новый план.`, p.response_format);
           }
         }
+        if (p.expectedSum !== undefined && !(Math.abs(plan.pickedSum - p.expectedSum) <= 1)) {
+          const refused = { refused: "plan_changed", expectedSum: p.expectedSum, actualSum: plan.pickedSum };
+          return toolSuccess(refused, `Сумма переноса изменилась с момента предпросмотра (ожидалось ${p.expectedSum} ₽, сейчас ${plan.pickedSum} ₽) — ничего не записано. Запустите предпросмотр заново и подтвердите новый план.`, p.response_format);
+        }
         backupLog();
         const res = await applyDefer(client, plan);
         out.ok = res.ok;
@@ -209,7 +214,7 @@ export function registerCloseTools(server: McpServer, client: PlanFactClient): v
           return toolSuccess(closedRef, `Месяц ${p.month} закрыт (по ${closedRef.closedThrough}) — запись отклонена. Предпросмотр доступен.`, p.response_format);
         }
         const plan = await accrualPlan(client, p.month, p.turnover, p.skip ?? []);
-        const out: Record<string, any> = { month: plan.month, date: plan.date, payDate: plan.payDate, jobs: plan.jobs, taxBase: plan.taxBase, values: Object.fromEntries(plan.jobs.map((j) => [j.code, j.value])), warning: ENP_WARNING, confirmed };
+        const out: Record<string, any> = { month: plan.month, date: plan.date, payDate: plan.payDate, jobs: plan.jobs, taxBase: plan.taxBase, values: Object.fromEntries(plan.jobs.filter((j) => !j.duplicate && j.value >= 0.01).map((j) => [j.code, j.value])), warning: ENP_WARNING, confirmed };
         const lines = plan.jobs.map((j) => `${j.code} ${j.title}: ${j.value} ₽${j.duplicate ? " — ДУБЛЬ, пропуск" : ""}${j.note ? ` (${j.note})` : ""}`);
         const head = `Начисления ${plan.month} (дата ${plan.date}, оплата налога ${plan.payDate}), база налога ${plan.taxBase} ₽:\n${lines.join("\n")}`;
         if (!confirmed) {
