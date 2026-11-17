@@ -6,6 +6,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PlanFactClient } from "./services/planfactClient.js";
 import { registerAnalysisTools } from "./tools/analysisTools.js";
+import { registerCloseTools } from "./tools/closeTools.js";
 import { registerCounterpartyTools } from "./tools/counterpartyTools.js";
 import { registerFinanceAssistantTools } from "./tools/financeAssistantTools.js";
 import { registerOperationTools } from "./tools/operationTools.js";
@@ -26,6 +27,7 @@ const client = new PlanFactClient(process.env.PLANFACT_API_KEY || "");
 registerReferenceTools(server, client);
 registerOperationTools(server, client);
 registerAnalysisTools(server, client);
+registerCloseTools(server, client);
 registerFinanceAssistantTools(server, client);
 registerCounterpartyTools(server, client);
 
