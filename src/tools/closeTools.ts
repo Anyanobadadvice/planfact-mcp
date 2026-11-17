@@ -3,6 +3,7 @@ import { z } from "zod";
 import { markdownTable, toolError, toolSuccess, untrusted } from "../formatters.js";
 import { responseFormatSchema } from "../schemas/common.js";
 import type { PlanFactClient } from "../services/planfactClient.js";
+import { accrualPlan, applyAccruals, ENP_WARNING, turnoverSchema } from "../services/accruals.js";
 import { applyDefer, backupOf, cdekUnaccrued, deferPlan, fitBudget, preflight, receivables, revenueCheck, RESPONSE_BUDGET } from "../services/close.js";
 
 const monthSchema = z
@@ -177,6 +178,47 @@ export function registerCloseTools(server: McpServer, client: PlanFactClient): v
         fitBudget(out, ["pick", "failed"]);
         const text = `${summary}\nПеренесено ${res.ok} из ${plan.picked}${res.failed.length ? `, ошибок ${res.failed.length}` : ""}. Выручка после переноса: ПФ ${res.after.pfRevenue}, МС ${res.after.msRevenue}, Δ ${res.after.delta} ₽.`;
         return toolSuccess(out, text, p.response_format);
+      } catch (e) {
+        return toolError(e);
+      }
+    },
+  );
+  server.registerTool(
+    "planfact_month_accruals",
+    {
+      title: "Month-close accruals 4.5-4.9",
+      description:
+        "Пять начислений ОПИУ (4.5 материалы, 4.6 упаковка, 4.7 списание, 4.8 ГП, 4.9 налог на прибыль 1.7%). turnover — структурированный результат moysklad_folder_turnover({folder:'all'}). confirmed:false — только предпросмотр (jobs, дубли, taxBase, предупреждение про ЕНП), ничего не пишет. confirmed:true — запись непродублированных проводок (POST /operations/accrual, налог — POST /operations/outcome с isCommitted:false) и перепроверка по статьям. skip — коды, которые пропустить (например ['4.9'], если налог уже разнесён). Запись только после явного подтверждения пользователя.",
+      inputSchema: z
+        .object({
+          month: monthSchema,
+          turnover: turnoverSchema,
+          skip: z.array(z.enum(["4.5", "4.6", "4.7", "4.8", "4.9"])).optional().describe("Коды начислений, которые не делать."),
+          confirmed: z.boolean().describe("true — записать (только после явного подтверждения пользователя); false — только предпросмотр."),
+          response_format: responseFormatSchema,
+        })
+        .strict(),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async (p) => {
+      try {
+        const confirmed = p.confirmed === true;
+        const closed = process.env.PLANFACT_CLOSED_THROUGH?.trim();
+        if (confirmed && closed && /^\d{4}-\d{2}$/.test(closed) && p.month <= closed) {
+          return toolSuccess({ refused: "month_closed", month: p.month, closedThrough: closed }, `Месяц ${p.month} закрыт (по ${closed}) — запись отклонена. Предпросмотр доступен.`, p.response_format);
+        }
+        const plan = await accrualPlan(client, p.month, p.turnover, p.skip ?? []);
+        const out: Record<string, any> = { month: plan.month, date: plan.date, payDate: plan.payDate, jobs: plan.jobs, taxBase: plan.taxBase, warning: ENP_WARNING, confirmed };
+        const lines = plan.jobs.map((j) => `${j.code} ${j.title}: ${j.value} ₽${j.duplicate ? " — ДУБЛЬ, пропуск" : ""}${j.note ? ` (${j.note})` : ""}`);
+        const head = `Начисления ${plan.month} (дата ${plan.date}, оплата налога ${plan.payDate}), база налога ${plan.taxBase} ₽:\n${lines.join("\n")}`;
+        if (!confirmed) {
+          return toolSuccess(out, `${head}\n⚠️ ${ENP_WARNING}.\nПредпросмотр: ничего не записано.`, p.response_format);
+        }
+        const res = await applyAccruals(client, plan);
+        out.results = res.results;
+        out.after = res.after;
+        const failed = res.results.filter((r) => !r.ok).length;
+        return toolSuccess(out, `${head}\nЗаписано ${res.results.length - failed} из ${res.results.length}${failed ? `, ошибок ${failed}` : ""}. После: ${JSON.stringify(res.after)}`, p.response_format);
       } catch (e) {
         return toolError(e);
       }
