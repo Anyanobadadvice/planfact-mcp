@@ -215,7 +215,7 @@ export function registerCloseTools(server: McpServer, client: PlanFactClient): v
           return toolSuccess(out, `${head}\n⚠️ ${ENP_WARNING}.\nПредпросмотр: ничего не записано.`, p.response_format);
         }
         const res = await applyAccruals(client, plan);
-        out.results = res.results;
+        out.results = res.results.map((r) => (r.err ? { ...r, err: untrusted(r.err) } : r));
         out.after = res.after;
         const failed = res.results.filter((r) => !r.ok).length;
         return toolSuccess(out, `${head}\nЗаписано ${res.results.length - failed} из ${res.results.length}${failed ? `, ошибок ${failed}` : ""}. После: ${JSON.stringify(res.after)}`, p.response_format);
